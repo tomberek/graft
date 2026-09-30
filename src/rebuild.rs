@@ -4,17 +4,19 @@ use anyhow::{bail, Context, Result};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
-/// The `--rebuild` counterpart to `replace::graft_path`: find `path`'s
+/// The `--rebuild` counterpart to `replace::graft_recipe`: find `path`'s
 /// deriver, substitute the changed dependencies in its derivation JSON, and
-/// do a real sandboxed rebuild. Requires a known deriver — a graft or
-/// directly-added path has none.
+/// return the new `.drv` path plus its output name — building it is a
+/// separate step left to the caller, so several independent rebuilds can be
+/// batched into one `nix build` call (see `derivation::build_many`).
+/// Requires a known deriver — a graft or directly-added path has none.
 ///
 /// Locates the substitution point via `path`'s declared `.drv` structure, a
 /// different graph than the runtime reference graph that decided `path`
 /// needs touching in the first place (see DESIGN.md §6) — when a changed
 /// reference isn't declared there, this fails loudly rather than silently
 /// rebuilding unmodified.
-pub fn rebuild_path(path: &Path, all_refs: &[(PathBuf, PathBuf)], nix_args: &[String]) -> Result<PathBuf> {
+pub fn rebuild_recipe(path: &Path, all_refs: &[(PathBuf, PathBuf)]) -> Result<(PathBuf, String)> {
     let changed: Vec<&(PathBuf, PathBuf)> = all_refs.iter().filter(|(o, n)| o != n).collect();
 
     log::v(format!("rebuilding {} ({} changed dependency/ies)", path.display(), changed.len()));
@@ -47,7 +49,7 @@ pub fn rebuild_path(path: &Path, all_refs: &[(PathBuf, PathBuf)], nix_args: &[St
     }
 
     let new_drv = derivation::add_with_retry(inner)?;
-    derivation::realise(&new_drv, &output_name, nix_args)
+    Ok((new_drv, output_name))
 }
 
 /// Which of `changed_old_refs` a `--rebuild` of `path` would fail to locate,

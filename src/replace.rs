@@ -1,4 +1,4 @@
-use crate::{derivation, editor, log, rebuild, store};
+use crate::{derivation, editor, log, rebuild, report, store};
 use anyhow::{bail, Context, Result};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -60,6 +60,10 @@ pub struct ReplaceOptions<'a> {
     pub force_rebuild: &'a [PathBuf],
     pub force_graft: &'a [PathBuf],
     pub interactive: bool,
+    /// Write an HTML report (dependency graph + details table) here.
+    /// Works under `--dry-run` too — anything not yet built just shows as
+    /// "(pending)" instead of a concrete new path.
+    pub report: Option<&'a Path>,
 }
 
 /// Replace all of `old` with `new` (for each pair in `replacements`), in the
@@ -175,6 +179,7 @@ pub fn replace(closure_root: &Path, replacements: &[(PathBuf, PathBuf)], opts: &
             }
         }
         eprintln!("[dry-run] {}", tally.summarize());
+        write_report_if_requested(opts, closure_root, closure_root, &nodes, None, &tally)?;
         return Ok(ReplaceResult { new_root: closure_root.to_path_buf() });
     }
 
@@ -198,25 +203,46 @@ pub fn replace(closure_root: &Path, replacements: &[(PathBuf, PathBuf)], opts: &
     }
 
     for (level, paths) in &by_level {
-        log::v(format!("level {level}: building {} path(s) in parallel", paths.len()));
-        let outcomes: Vec<(PathBuf, Result<PathBuf>)> = std::thread::scope(|scope| {
+        // Phase 1: construct every recipe in parallel — cheap (`nix
+        // derivation add`, no building), but still worth spreading across
+        // threads since each one is a handful of subprocess round-trips.
+        log::v(format!("level {level}: constructing {} recipe(s) in parallel", paths.len()));
+        let recipes: Vec<(PathBuf, Result<(PathBuf, String)>)> = std::thread::scope(|scope| {
             let handles: Vec<_> = paths
                 .iter()
                 .map(|path| {
                     let path = path.clone();
                     let use_rebuild = matches!(nodes[&path].category, Category::NeedsRebuild);
                     let resolved = &resolved;
-                    let ctx = &ctx;
                     scope.spawn(move || {
-                        let outcome = build_one(&path, use_rebuild, resolved, ctx);
+                        let outcome = build_recipe(&path, use_rebuild, resolved);
                         (path, outcome)
                     })
                 })
                 .collect();
-            handles.into_iter().map(|h| h.join().expect("graft/rebuild worker thread panicked")).collect()
+            handles.into_iter().map(|h| h.join().expect("recipe-construction worker thread panicked")).collect()
         });
-        for (path, outcome) in outcomes {
-            let new_path = outcome.with_context(|| format!("while grafting {}", path.display()))?;
+
+        // Phase 2: one `nix build` call for the whole level. Bails on the
+        // first failed recipe (in the same deterministic `paths` order the
+        // old one-path-at-a-time walk reported errors in) before spending
+        // anything on a build we already know won't fully succeed.
+        let mut targets = Vec::with_capacity(recipes.len());
+        let mut recipe_of: HashMap<PathBuf, (PathBuf, String)> = HashMap::new();
+        for (path, outcome) in recipes {
+            let verb = if matches!(nodes[&path].category, Category::NeedsRebuild) { "rebuilding" } else { "grafting" };
+            let recipe = outcome.with_context(|| format!("while {verb} {}", path.display()))?;
+            targets.push(recipe.clone());
+            recipe_of.insert(path, recipe);
+        }
+        log::v(format!("level {level}: building {} target(s) in one nix build call", targets.len()));
+        let built = derivation::build_many(&targets, ctx.nix_args)?;
+
+        // Phase 3: map each path's recipe back to its built output.
+        for (path, (drv, output_name)) in recipe_of {
+            let new_path = built.get(&(drv.clone(), output_name.clone())).cloned().with_context(|| {
+                format!("nix build did not report an output for {}'s recipe ({}^{output_name})", path.display(), drv.display())
+            })?;
             log::v(format!("{} -> {}", path.display(), new_path.display()));
             eprintln!(
                 "{} {} -> {}",
@@ -224,7 +250,7 @@ pub fn replace(closure_root: &Path, replacements: &[(PathBuf, PathBuf)], opts: &
                 path.display(),
                 new_path.display()
             );
-            resolved.insert(path.clone(), new_path);
+            resolved.insert(path, new_path);
         }
     }
 
@@ -233,14 +259,58 @@ pub fn replace(closure_root: &Path, replacements: &[(PathBuf, PathBuf)], opts: &
         .get(closure_root)
         .cloned()
         .with_context(|| format!("closure root {} missing from resolved map", closure_root.display()))?;
+    write_report_if_requested(opts, closure_root, &new_root, &nodes, Some(&resolved), &tally)?;
     Ok(ReplaceResult { new_root })
 }
 
+/// `--report <dir>`: an HTML dependency graph + details table for
+/// everything that changed or caused a change — cutoff/unchanged paths are
+/// deliberately excluded, since a large closure's "nothing happened here"
+/// majority is noise, not signal, for a report meant to answer "what did
+/// this graft actually do."
+fn write_report_if_requested(
+    opts: &ReplaceOptions,
+    closure_root: &Path,
+    new_root: &Path,
+    nodes: &HashMap<PathBuf, Node>,
+    resolved: Option<&HashMap<PathBuf, PathBuf>>,
+    tally: &Tally,
+) -> Result<()> {
+    let Some(dir) = opts.report else { return Ok(()) };
+    let report_nodes = build_report_nodes(nodes, resolved)?;
+    let index = report::write(dir, closure_root, new_root, opts.dry_run, &tally.summarize(), &report_nodes)?;
+    eprintln!("wrote report to {}", index.display());
+    Ok(())
+}
+
+fn build_report_nodes(nodes: &HashMap<PathBuf, Node>, resolved: Option<&HashMap<PathBuf, PathBuf>>) -> Result<Vec<report::ReportNode>> {
+    let included: HashSet<&PathBuf> = nodes
+        .iter()
+        .filter(|(_, n)| !matches!(n.category, Category::Cutoff | Category::Unchanged))
+        .map(|(p, _)| p)
+        .collect();
+    let mut out = Vec::new();
+    for (path, node) in nodes {
+        if !included.contains(path) {
+            continue;
+        }
+        let (label, color, new_path) = match &node.category {
+            Category::Explicit(new) => ("explicit replacement", "#2563eb", Some(new.clone())),
+            Category::NeedsGraft => ("grafted", "#16a34a", resolved.and_then(|r| r.get(path).cloned())),
+            Category::NeedsRebuild => ("rebuilt", "#ea580c", resolved.and_then(|r| r.get(path).cloned())),
+            Category::Cutoff | Category::Unchanged => unreachable!("filtered out above"),
+        };
+        let depends_on = store::references(path)?.into_iter().filter(|r| included.contains(r)).collect();
+        out.push(report::ReportNode { path: path.clone(), label, color, level: node.level, new_path, depends_on });
+    }
+    Ok(out)
+}
+
 /// The parts of a `replace` invocation that stay constant across the whole
-/// walk, bundled so `classify`/`build_one` don't need one parameter per
+/// walk, bundled so `classify`/`build_recipe` don't need one parameter per
 /// option. Shared read-only across worker threads during the parallel
-/// build phase — every field is `Sync` (no interior mutability), so no
-/// locking is needed.
+/// recipe-construction phase — every field is `Sync` (no interior
+/// mutability), so no locking is needed.
 struct Ctx<'a> {
     explicit: &'a HashMap<PathBuf, PathBuf>,
     cutoffs: &'a HashSet<PathBuf>,
@@ -350,13 +420,15 @@ fn changed_refs_of(path: &Path, nodes: &HashMap<PathBuf, Node>) -> Result<Vec<Pa
     Ok(out)
 }
 
-/// Graft or rebuild `path` for the parallel build phase: looks up each
-/// direct reference's already-resolved value (guaranteed present — by
+/// Constructs `path`'s graft/rebuild recipe (a `.drv` plus output name, not
+/// yet built) for the parallel construction phase: looks up each direct
+/// reference's already-resolved value (guaranteed present — by
 /// construction, every direct reference is either resolved with no build at
 /// all, or was classified at a strictly lower level, already merged into
-/// `resolved` before this level started) and dispatches to the same
-/// `graft_path`/`rebuild_path` the old single-threaded walk used.
-fn build_one(path: &Path, use_rebuild: bool, resolved: &HashMap<PathBuf, PathBuf>, ctx: &Ctx) -> Result<PathBuf> {
+/// `resolved` before this level started) and dispatches to
+/// `graft_recipe`/`rebuild::rebuild_recipe`. Building the recipe is a
+/// separate step (`derivation::build_many`, batched across the whole level).
+fn build_recipe(path: &Path, use_rebuild: bool, resolved: &HashMap<PathBuf, PathBuf>) -> Result<(PathBuf, String)> {
     let all_refs: Vec<(PathBuf, PathBuf)> = store::references(path)?
         .into_iter()
         .map(|r| {
@@ -365,9 +437,9 @@ fn build_one(path: &Path, use_rebuild: bool, resolved: &HashMap<PathBuf, PathBuf
         })
         .collect();
     if use_rebuild {
-        rebuild::rebuild_path(path, &all_refs, ctx.nix_args)
+        rebuild::rebuild_recipe(path, &all_refs)
     } else {
-        graft_path(path, &all_refs, ctx.nix_args)
+        graft_recipe(path, &all_refs)
     }
 }
 
@@ -583,9 +655,12 @@ fn interactive_select(
     Ok(())
 }
 
-/// Graft `path` by building a tiny synthetic derivation whose builder does
-/// `nix-store --dump | sed | nix-store --restore` (the same technique Guix
-/// and nixpkgs's `replaceDependencies` use), then realising it normally.
+/// Graft `path` by constructing a tiny synthetic derivation whose builder
+/// does `nix-store --dump | sed | nix-store --restore` (the same technique
+/// Guix and nixpkgs's `replaceDependencies` use) — returns the new `.drv`
+/// path and its output name (always `"out"`); building it is a separate
+/// step left to the caller, so several independent grafts can be batched
+/// into one `nix build` call (see `derivation::build_many`).
 ///
 /// Goes through a real derivation build rather than `nix store add`
 /// deliberately: that path never registers references (confirmed
@@ -593,7 +668,7 @@ fn interactive_select(
 /// to further closure walks. Registering references directly requires
 /// `nix-store --register-validity`, which needs trusted-user/root
 /// privileges a normal build doesn't. See DESIGN.md §4 for the full story.
-fn graft_path(path: &Path, all_refs: &[(PathBuf, PathBuf)], nix_args: &[String]) -> Result<PathBuf> {
+fn graft_recipe(path: &Path, all_refs: &[(PathBuf, PathBuf)]) -> Result<(PathBuf, String)> {
     let changed: Vec<&(PathBuf, PathBuf)> = all_refs.iter().filter(|(o, n)| o != n).collect();
 
     let mut sed_expr = String::new();
@@ -603,7 +678,7 @@ fn graft_path(path: &Path, all_refs: &[(PathBuf, PathBuf)], nix_args: &[String])
         if old_b.len() != new_b.len() {
             // Should be unreachable: every `new` reaching here either came
             // from a user-validated top-level pair, or from a prior
-            // graft_path call, which always preserves the original name.
+            // graft_recipe call, which always preserves the original name.
             bail!(
                 "internal invariant violated grafting {}: {} vs {} differ in length",
                 path.display(),
@@ -641,13 +716,11 @@ fn graft_path(path: &Path, all_refs: &[(PathBuf, PathBuf)], nix_args: &[String])
     input_srcs.sort();
     input_srcs.dedup();
 
-    derivation::build_and_realise(
-        derivation::DerivationSpec {
-            name,
-            builder: bash,
-            args: vec!["-c".to_string(), script],
-            input_srcs,
-        },
-        nix_args,
-    )
+    let new_drv = derivation::construct_derivation(derivation::DerivationSpec {
+        name,
+        builder: bash,
+        args: vec!["-c".to_string(), script],
+        input_srcs,
+    })?;
+    Ok((new_drv, "out".to_string()))
 }

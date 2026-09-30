@@ -724,6 +724,36 @@ fn replace_out_link_creates_a_gc_root_symlink() {
 }
 
 #[test]
+fn out_link_writes_an_appending_provenance_history() {
+    let old = nix_build("oldDep");
+    let new = nix_build("newDep");
+    let consumer = nix_build("consumer");
+
+    let link_dir = tempfile::tempdir().unwrap();
+    let link_path = link_dir.path().join("result");
+    let history_path = link_dir.path().join("result.graft-history.jsonl");
+
+    let args = ["replace", &consumer, "--replace", &format!("{old}={new}"), "--out-link", link_path.to_str().unwrap()];
+
+    // Run twice: history should accumulate, not just record the latest run.
+    for _ in 0..2 {
+        let output = graft(&args, None);
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    }
+
+    let history = fs::read_to_string(&history_path).expect("--out-link should have written a provenance history file");
+    let lines: Vec<&str> = history.lines().collect();
+    assert_eq!(lines.len(), 2, "two runs should append two lines, got: {history}");
+
+    for line in &lines {
+        let entry: serde_json::Value = serde_json::from_str(line).expect("each history line should be valid JSON");
+        assert!(entry["timestamp"].is_number(), "expected a numeric timestamp: {line}");
+        assert!(entry["command"].is_array(), "expected the command as an array: {line}");
+        assert!(entry["new_root"].as_str().is_some_and(|s| s.starts_with("/nix/store/")), "expected new_root: {line}");
+    }
+}
+
+#[test]
 fn dry_run_does_not_create_an_out_link() {
     let old = nix_build("oldDep");
     let new = nix_build("newDep");
@@ -777,11 +807,66 @@ fn replace_grafts_two_independent_nodes_at_the_same_level_in_parallel() {
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("level 1: building 2 path(s) in parallel"),
+        stderr.contains("level 1: constructing 2 recipe(s) in parallel"),
         "parMidA and parMidB should batch into the same parallel level: {stderr}"
+    );
+    assert!(
+        stderr.contains("level 1: building 2 target(s) in one nix build call"),
+        "both recipes should be built in a single batched nix build call, not two separate ones: {stderr}"
     );
     assert!(
         stderr.contains("3 grafted") && stderr.contains("2 explicit replacement"),
         "expected parMidA/parMidB/parallelTop grafted (3) plus the 2 explicit leaf targets, got: {stderr}"
     );
+}
+
+#[test]
+fn report_html_includes_every_changed_node_and_excludes_unchanged_ones() {
+    let old = nix_build("chainLeaf");
+    let new = nix_build("chainLeafV2");
+    let mid = nix_build("chainMid");
+    let top = nix_build("chainTop");
+
+    let report_dir = tempfile::tempdir().unwrap();
+    let output = graft(
+        &["replace", &top, "--replace", &format!("{old}={new}"), "--report", report_dir.path().to_str().unwrap()],
+        None,
+    );
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+
+    let index = report_dir.path().join("index.html");
+    let html = fs::read_to_string(&index).expect("--report should have written index.html");
+    assert!(html.contains("<svg"), "expected an SVG graph in the report");
+    // The changed chain (leaf, mid, top) should all appear...
+    for path in [&old, &mid, &top] {
+        assert!(html.contains(path), "expected {path} to appear in the report");
+    }
+    // ...but only 3 rows in the table (unchanged nodes are noise, not signal).
+    assert_eq!(html.matches("<tr><td>").count(), 3, "expected exactly 3 table rows, got:\n{html}");
+}
+
+#[test]
+fn report_html_under_dry_run_shows_pending_instead_of_a_built_path() {
+    let old = nix_build("oldDep");
+    let new = nix_build("newDep");
+    let consumer = nix_build("consumer");
+
+    let report_dir = tempfile::tempdir().unwrap();
+    let output = graft(
+        &[
+            "replace",
+            &consumer,
+            "--replace",
+            &format!("{old}={new}"),
+            "--dry-run",
+            "--report",
+            report_dir.path().to_str().unwrap(),
+        ],
+        None,
+    );
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+
+    let html = fs::read_to_string(report_dir.path().join("index.html")).expect("--report should work under --dry-run too");
+    assert!(html.contains("(dry run)"), "expected the dry-run marker in the report title");
+    assert!(html.contains("(pending)"), "expected the not-yet-built consumer to show as pending, not a real path");
 }

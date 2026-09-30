@@ -738,22 +738,45 @@ relationship to each other at all.
    would force its level strictly higher, by the `1 + max(...)` construction
    itself. No separate independence check is needed; it falls out of how
    levels are defined.
-2. **Level-by-level parallel execution** — bucket every `NeedsGraft`/
+2. **Level-by-level, in three phases** — bucket every `NeedsGraft`/
    `NeedsRebuild` path by its level into a `BTreeMap<usize, Vec<PathBuf>>`
-   (ordered, so levels process low to high), then for each level spawn one
-   `std::thread::scope` thread per path, all reading the *same* `resolved:
-   HashMap<PathBuf, PathBuf>` built up so far. This is safe with zero
-   locking: every reference a level-N path needs is guaranteed already in
-   `resolved` before level N starts (it's either non-building, seeded
-   upfront, or itself at a strictly lower level, already merged), and
-   nothing mutates `resolved` again until every thread in the *current*
-   level has been joined — a hard barrier between levels, not a lock around
-   shared state. `graft_path`/`rebuild_path` themselves are completely
-   unchanged; only how they're scheduled is different.
+   (ordered, so levels process low to high), then per level:
+   - **Construct** every path's recipe in parallel (`std::thread::scope`,
+     one thread per path) — `graft_recipe`/`rebuild::rebuild_recipe`, which
+     is everything `graft_path`/`rebuild_path` used to do *except* the
+     final build: `nix derivation add` a synthetic or edited derivation and
+     return its `.drv` path plus output name. Cheap (no building), but
+     still worth spreading across threads since each one is a handful of
+     subprocess round-trips (`which`, `nix path-info`, `nix derivation
+     show`/`add`, retried on self-correction).
+   - **Build** every recipe in the level with *one* `derivation::
+     build_many` call — `nix build <drv1>^<out1> <drv2>^<out2> ...
+     --no-link --json`, parsed by matching each result's `drvPath`/output
+     name back to the recipe that produced it. This is the piece that
+     actually bounds concurrency: a level with 200 independent paths used
+     to mean 200 threads each spawning their *own* `nix build` subprocess,
+     with nothing capping how many ran at once. One batched call instead
+     hands the whole level to Nix's own daemon-side job scheduling — the
+     same mechanism that safely builds all of nixpkgs, already respecting
+     `--max-jobs`/`--cores` (forwarded via `nix_args` like every other
+     build-related flag here) — rather than this tool reinventing a
+     concurrency limit on top of subprocesses Nix would have queued anyway.
+   - **Map back**: for each path, look up `(drv, output_name)` in the
+     batch's result map and merge into `resolved`.
 
-No new dependency: `std::thread::scope` (stable since Rust 1.63) is enough,
-since the "work" being parallelized is spawning and waiting on `nix build`
-subprocesses, not CPU-bound Rust code.
+   All three phases read the *same* `resolved: HashMap<PathBuf, PathBuf>`
+   built up so far, safely with zero locking: every reference a level-N
+   path needs is guaranteed already resolved before level N starts (either
+   non-building and seeded upfront, or itself at a strictly lower level,
+   already merged), and nothing mutates `resolved` again until the whole
+   level — construction and the batched build together — has finished. A
+   hard barrier between levels, not a lock around shared state.
+
+No new dependency: `std::thread::scope` (stable since Rust 1.63) is enough
+for the parallel recipe-construction phase, since that "work" is spawning
+and waiting on cheap subprocesses, not CPU-bound Rust code — and the actual
+expensive concurrency (the builds themselves) is Nix's own job scheduler's
+job, not this tool's, once recipes are batched into one call.
 
 The same `classify` pass also answers "what happened, in aggregate" for
 free — `Tally` counts every category across the whole closure and
@@ -790,3 +813,80 @@ to root), and available on every subcommand via `StrategyArgs`.
 `--version` was simply missing — `#[command(version)]` on the `Cli` struct
 is all `clap`'s `Parser` derive needs to read it from `Cargo.toml`; it
 doesn't do this automatically without being asked.
+
+`--out-link` also writes `src/provenance.rs`'s one-line-per-run history to
+`<path>.graft-history.jsonl` (timestamp, `std::env::args()` verbatim,
+`new_root`) — since `--out-link` itself is necessarily a single symlink
+pointing at only the *latest* generation, this is what makes "what did I
+graft into this last week, and with what command" answerable after the
+fact, rather than lost the moment a second run overwrites the symlink.
+Deliberately just Unix-epoch integers, not a formatted date: pulling in a
+date-formatting crate for one cosmetic improvement isn't worth it, and
+`date -d @<timestamp>` converts it in one command if a human needs to read
+it directly. Recorded as an appending JSONL file rather than a single
+overwritten JSON object specifically so the *history* survives repeated
+grafts into the same out-link, not just the most recent one.
+
+## 12. `--report`: an HTML view of what a graft actually did
+
+`--report <dir>` (works under `--dry-run` too) writes `<dir>/index.html`: a
+dependency graph plus a details table, self-contained (no CDN, no build
+step, no JS framework — just hand-written SVG and a `<style>` block).
+
+The graph's layout isn't a new layout algorithm — it's `classify`'s
+scheduling `level` (§10), reused directly for vertical position. That's not
+a coincidence worth glossing over: "which nodes could build at the same
+time" and "which nodes make sense to draw on the same row of a dependency
+diagram" are the same question, so the same data answers both. Only
+`Explicit`/`NeedsGraft`/`NeedsRebuild` nodes are included — `Cutoff`/
+`Unchanged` are deliberately excluded, since a real closure's unchanged
+majority is noise for a report meant to answer "what did this graft do,"
+not a graph of the whole closure. Edges are drawn only between two *included*
+nodes (a node's direct references that also made the cut), so the graph
+shows the actual "story" subgraph, not a mess of everything each node
+happens to depend on.
+
+One real bug caught by actually looking at the rendered output, not just
+checking the HTML was well-formed: the first version styled node labels as
+white text (assuming they'd sit *inside* a colored circle) but positioned
+them *below* the circle, on the page's light background — invisible.
+Screenshotting the generated report (headless Chromium) during development
+caught this immediately; reading the SVG source did not. Fixed by using a
+dark label color, and separately, labels were switched from the full
+`hash-name-version` basename to just `name-version` (`store::store_name`) —
+the full hash prefix under every node made even a 5-node graph visually
+noisy for no informational gain the details table (which does show full
+paths) doesn't already provide better.
+
+### Next step, not yet built: embedding `nix-diff`/`diffoscope`
+
+The report currently shows *that* something changed and *what* it resolved
+to, not *why* — no derivation-level or content-level diff yet. The natural
+extension, and the concrete resolution to what was previously a vague
+"add a `--diff` flag" idea:
+
+- **`nix-diff`** (structural derivation diff) is only meaningful where a
+  derivation genuinely changed — `Explicit` targets (why the old package is
+  being replaced: version, patches, hash) and `NeedsRebuild` nodes (exactly
+  what got substituted in `inputs.drvs`/`env`/`args`). It has nothing useful
+  to say about a `NeedsGraft` node: grafting never touches the recipe, only
+  the built bytes, so the old and new derivers are identical — this is the
+  concrete answer to "what's the graft-mode diff story," previously an open
+  question. `nix-diff`'s output is colored terminal text, not HTML; simplest
+  first cut is capturing its plain-text form into a `<pre>` block rather
+  than converting ANSI to HTML spans (a real but separable nice-to-have).
+- **`diffoscope`** (content/artifact diff) applies uniformly wherever both
+  an old and a new *path* are known (`Explicit`, and `NeedsGraft`/
+  `NeedsRebuild` once built — not under `--dry-run`, where the new path is
+  only `(pending)`). Already has its own `--html <file>` output mode, so
+  the integration is "shell out, link to the file it wrote" — no HTML
+  generation of our own needed for this part.
+- Both are real subprocess costs per node, unlike the base report (pure
+  in-memory string formatting) — this should be a separate opt-in flag
+  (e.g. `--report-diff`, meaningful only alongside `--report`), not bundled
+  into `--report` unconditionally, so asking for the quick graph never
+  implies an unexpected per-node diffoscope run.
+- Needs `pkgs.nix-diff`/`pkgs.diffoscope` added to `flake.nix`'s devShell,
+  and — matching how every other subprocess-driving test in this project
+  works — a stub-script test (same pattern as `stub_editor`) rather than
+  requiring the real tools for `cargo test` to pass.

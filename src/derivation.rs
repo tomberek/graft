@@ -1,6 +1,7 @@
 use crate::{log, store};
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -54,10 +55,12 @@ pub struct DerivationSpec {
     pub input_srcs: Vec<PathBuf>,
 }
 
-/// Build the ATerm-JSON body for `spec`, self-correct its output path via
-/// [`add_with_retry`], and realise it. `nix_args` are forwarded verbatim to
-/// the `nix build` call (e.g. `-Lv`, `--builders ...`).
-pub fn build_and_realise(spec: DerivationSpec, nix_args: &[String]) -> Result<PathBuf> {
+/// Build the ATerm-JSON body for `spec` and self-correct its output path via
+/// [`add_with_retry`], returning the new `.drv` path — output name is
+/// always `"out"` for this spec shape. Building it is a separate step left
+/// to the caller (`realise`, or [`build_many`] to batch it alongside other
+/// independent derivations into one `nix build` call).
+pub fn construct_derivation(spec: DerivationSpec) -> Result<PathBuf> {
     log::v(format!(
         "constructing synthetic derivation `{}` with builder {} and {} input src(s)",
         spec.name,
@@ -92,8 +95,7 @@ pub fn build_and_realise(spec: DerivationSpec, nix_args: &[String]) -> Result<Pa
         "inputs": { "drvs": {}, "srcs": srcs },
     });
 
-    let new_drv = add_with_retry(inner)?;
-    realise(&new_drv, "out", nix_args)
+    add_with_retry(inner)
 }
 
 /// `nix derivation add` checks any output path / mirrored env var we supply
@@ -420,6 +422,57 @@ pub fn nix_build(build_args: &[String], nix_args: &[String]) -> Result<PathBuf> 
         .next()
         .map(|l| PathBuf::from(l.trim()))
         .with_context(|| format!("nix {} produced no output", args.join(" ")))
+}
+
+/// Builds several `<drv>^<output_name>` targets in a single `nix build`
+/// call, returning each one's output path keyed by `(drv, output_name)`.
+/// The point is bounding how many build subprocesses this tool spawns at
+/// once: a level of N independent grafts/rebuilds used to mean N threads
+/// each running their own `nix build`, with nothing capping N. Handing Nix
+/// one `nix build` call with all N targets instead lets its own
+/// daemon-side job scheduling (which already respects `--max-jobs`/
+/// `--cores`, forwarded via `nix_args` like everything else) bound real
+/// concurrency, the same way it already does for an ordinary multi-package
+/// `nix build`.
+pub fn build_many(targets: &[(PathBuf, String)], nix_args: &[String]) -> Result<HashMap<(PathBuf, String), PathBuf>> {
+    if targets.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let installables: Vec<String> = targets.iter().map(|(drv, output)| format!("{}^{output}", drv.display())).collect();
+    log::v(format!(
+        "running: nix build {} --no-link --json{}",
+        installables.join(" "),
+        if nix_args.is_empty() { String::new() } else { format!(" {}", nix_args.join(" ")) }
+    ));
+    let mut child = Command::new("nix")
+        .arg("build")
+        .args(&installables)
+        .args(["--no-link", "--json"])
+        .args(nix_args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .context("failed to spawn nix build")?;
+    let mut stdout = String::new();
+    child.stdout.take().expect("piped stdout").read_to_string(&mut stdout).context("failed to read nix build --json output")?;
+    let status = child.wait().context("nix build did not exit")?;
+    if !status.success() {
+        bail!("nix build {} failed (see build output above)", installables.join(" "));
+    }
+
+    // Schema: `[{"drvPath": "...", "outputs": {"<name>": "<path>", ...}}, ...]`.
+    let parsed: Vec<Value> = serde_json::from_str(&stdout).context("nix build --json did not produce the expected JSON array")?;
+    let mut results = HashMap::new();
+    for entry in parsed {
+        let drv_path = PathBuf::from(entry.get("drvPath").and_then(Value::as_str).context("build result missing `drvPath`")?);
+        let outputs = entry.get("outputs").and_then(Value::as_object).context("build result missing `outputs`")?;
+        for (name, path) in outputs {
+            if let Some(path) = path.as_str() {
+                results.insert((drv_path.clone(), name.clone()), PathBuf::from(path));
+            }
+        }
+    }
+    Ok(results)
 }
 
 /// Creates (or replaces) a GC-root symlink at `link` pointing at `target`,

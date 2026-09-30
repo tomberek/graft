@@ -6,8 +6,10 @@ mod editor;
 mod installable;
 mod log;
 mod nixos_system;
+mod provenance;
 mod rebuild;
 mod replace;
+mod report;
 mod store;
 
 use anyhow::Result;
@@ -64,6 +66,11 @@ struct StrategyArgs {
     /// without this the result isn't protected from a concurrent GC.
     #[arg(short = 'o', long = "out-link")]
     out_link: Option<PathBuf>,
+    /// Write an HTML report (dependency graph + details table of
+    /// everything grafted/rebuilt/explicitly replaced) to `<dir>/index.html`.
+    /// Works under `--dry-run` too.
+    #[arg(long)]
+    report: Option<PathBuf>,
 }
 
 impl StrategyArgs {
@@ -76,6 +83,7 @@ impl StrategyArgs {
             force_rebuild: &self.force_rebuild_paths,
             force_graft: &self.force_graft_paths,
             interactive: self.interactive,
+            report: self.report.as_deref(),
         }
     }
 }
@@ -221,6 +229,7 @@ fn main() -> Result<()> {
     };
     if let Some(link) = out_link {
         derivation::add_out_link(&result.new_root, &link)?;
+        provenance::record(&link, &result.new_root)?;
     }
     println!("{}", result.new_root.display());
     Ok(())

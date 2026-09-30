@@ -78,7 +78,14 @@ Useful flags (all repeatable where noted):
 - `-o`/`--out-link <path>` — create a GC-root symlink at `path` pointing at
   the result, like `nix build -o`. Every build here otherwise passes
   `--no-link`, so without this the result isn't protected from a
-  concurrent garbage collection.
+  concurrent garbage collection. Also appends one line to
+  `<path>.graft-history.jsonl` (timestamp, exact command, resulting path) —
+  `--out-link` only ever points at the *latest* generation, so this is what
+  makes "what did I graft into this last week" answerable afterward.
+- `--report <dir>` — write `<dir>/index.html`: a dependency graph (colored
+  by strategy, laid out by the same level a path was scheduled at) plus a
+  details table of everything grafted, rebuilt, or explicitly replaced.
+  Self-contained, no CDN. Works under `--dry-run` too.
 - `-- <nix args>` — anything after a literal `--` is forwarded to the
   underlying `nix build` calls (e.g. `-- -Lv --builders ''`).
 
