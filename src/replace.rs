@@ -1,13 +1,52 @@
 use crate::{derivation, editor, log, rebuild, store};
 use anyhow::{bail, Context, Result};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 pub struct ReplaceResult {
     pub new_root: PathBuf,
-    /// (original path, grafted/rebuilt path) for every path actually
-    /// rewritten, dependencies before dependents.
-    pub grafted: Vec<(PathBuf, PathBuf)>,
+}
+
+/// Per-category counts across the whole closure, printed as a Guix-style
+/// closing summary — computed and reported entirely inside `replace()`
+/// itself, matching how `--dry-run`'s per-path reporting already works;
+/// there's no external consumer for the structured counts, so they don't
+/// leave this module.
+#[derive(Default, Clone, Copy)]
+struct Tally {
+    grafted: usize,
+    rebuilt: usize,
+    cutoff: usize,
+    unchanged: usize,
+    explicit: usize,
+}
+
+impl Tally {
+    fn total(&self) -> usize {
+        self.grafted + self.rebuilt + self.cutoff + self.unchanged + self.explicit
+    }
+
+    /// "12 grafted, 2 rebuilt, 43 unchanged (57 total)" — zero-count
+    /// categories omitted, matching how Guix reports a plan: state what's
+    /// actually happening, not every category whether or not it applies.
+    fn summarize(&self) -> String {
+        let parts: Vec<String> = [
+            (self.grafted, "grafted"),
+            (self.rebuilt, "rebuilt"),
+            (self.explicit, "explicit replacement"),
+            (self.cutoff, "cutoff"),
+            (self.unchanged, "unchanged"),
+        ]
+        .into_iter()
+        .filter(|(n, _)| *n > 0)
+        .map(|(n, label)| format!("{n} {label}"))
+        .collect();
+        if parts.is_empty() {
+            "nothing to do".to_string()
+        } else {
+            format!("{} ({} total)", parts.join(", "), self.total())
+        }
+    }
 }
 
 /// Strategy knobs, shared verbatim by `replace` and every `edit_*`
@@ -90,6 +129,18 @@ pub fn replace(closure_root: &Path, replacements: &[(PathBuf, PathBuf)], opts: &
         closure_paths.len()
     ));
 
+    for (old, new) in &explicit {
+        if !closure_paths.contains(old) {
+            eprintln!(
+                "warning: {} is not in the closure of {} — this --replace will have no effect \
+                 (nothing here can ever encounter it to substitute {})",
+                old.display(),
+                closure_root.display(),
+                new.display()
+            );
+        }
+    }
+
     if opts.interactive {
         interactive_select(&closure_paths, &explicit, opts.full_rebuild, &mut cutoffs, &mut force_rebuild, &mut force_graft)?;
     }
@@ -103,48 +154,93 @@ pub fn replace(closure_root: &Path, replacements: &[(PathBuf, PathBuf)], opts: &
         full_rebuild: opts.full_rebuild,
     };
 
+    let mut nodes: HashMap<PathBuf, Node> = HashMap::new();
+    for p in &closure_paths {
+        classify(p, &ctx, &mut nodes)?;
+    }
+    let tally = tally_of(&nodes);
+
     if opts.dry_run {
-        let mut memo = HashMap::new();
         for p in &closure_paths {
-            if !would_change(p, ctx.explicit, ctx.cutoffs, &mut memo)? {
-                continue;
-            }
-            // No graft/rebuild strategy applies to an explicit target.
-            if let Some(new) = ctx.explicit.get(p) {
-                eprintln!("[dry-run] {} is an explicit replacement target -> {}", p.display(), new.display());
-                continue;
-            }
-            let verb = if ctx.full_rebuild || ctx.force_rebuild.contains(p) { "rebuild" } else { "graft" };
-            let verb = if ctx.force_graft.contains(p) { "graft" } else { verb };
-            if verb == "rebuild" {
-                let changed_refs = changed_direct_refs(p, ctx.explicit, ctx.cutoffs, &mut memo)?;
-                report_rebuild_feasibility(p, &changed_refs)?;
-            } else {
-                eprintln!("[dry-run] would {verb} {}", p.display());
+            match &nodes[p].category {
+                Category::Explicit(new) => {
+                    eprintln!("[dry-run] {} is an explicit replacement target -> {}", p.display(), new.display());
+                }
+                Category::Cutoff | Category::Unchanged => {}
+                Category::NeedsGraft => eprintln!("[dry-run] would graft {}", p.display()),
+                Category::NeedsRebuild => {
+                    let changed_refs = changed_refs_of(p, &nodes)?;
+                    report_rebuild_feasibility(p, &changed_refs)?;
+                }
             }
         }
-        return Ok(ReplaceResult {
-            new_root: closure_root.to_path_buf(),
-            grafted: Vec::new(),
-        });
+        eprintln!("[dry-run] {}", tally.summarize());
+        return Ok(ReplaceResult { new_root: closure_root.to_path_buf() });
     }
 
-    let mut memo: HashMap<PathBuf, PathBuf> = HashMap::new();
-    let mut grafted = Vec::new();
-    for p in &closure_paths {
-        rewrite_one(p, &ctx, &mut memo, &mut grafted)
-            .with_context(|| format!("while grafting {}", p.display()))?;
+    // Seed every path that needs no build; bucket the rest by dependency
+    // level so each level's builds can run in parallel — see `classify`'s
+    // doc comment for why paths in the same level are provably independent.
+    let mut resolved: HashMap<PathBuf, PathBuf> = HashMap::new();
+    let mut by_level: BTreeMap<usize, Vec<PathBuf>> = BTreeMap::new();
+    for (path, node) in &nodes {
+        match &node.category {
+            Category::Explicit(new) => {
+                resolved.insert(path.clone(), new.clone());
+            }
+            Category::Cutoff | Category::Unchanged => {
+                resolved.insert(path.clone(), path.clone());
+            }
+            Category::NeedsGraft | Category::NeedsRebuild => {
+                by_level.entry(node.level).or_default().push(path.clone());
+            }
+        }
     }
-    let new_root = memo
+
+    for (level, paths) in &by_level {
+        log::v(format!("level {level}: building {} path(s) in parallel", paths.len()));
+        let outcomes: Vec<(PathBuf, Result<PathBuf>)> = std::thread::scope(|scope| {
+            let handles: Vec<_> = paths
+                .iter()
+                .map(|path| {
+                    let path = path.clone();
+                    let use_rebuild = matches!(nodes[&path].category, Category::NeedsRebuild);
+                    let resolved = &resolved;
+                    let ctx = &ctx;
+                    scope.spawn(move || {
+                        let outcome = build_one(&path, use_rebuild, resolved, ctx);
+                        (path, outcome)
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().expect("graft/rebuild worker thread panicked")).collect()
+        });
+        for (path, outcome) in outcomes {
+            let new_path = outcome.with_context(|| format!("while grafting {}", path.display()))?;
+            log::v(format!("{} -> {}", path.display(), new_path.display()));
+            eprintln!(
+                "{} {} -> {}",
+                if matches!(nodes[&path].category, Category::NeedsRebuild) { "rebuilt" } else { "grafted" },
+                path.display(),
+                new_path.display()
+            );
+            resolved.insert(path.clone(), new_path);
+        }
+    }
+
+    eprintln!("{}", tally.summarize());
+    let new_root = resolved
         .get(closure_root)
         .cloned()
-        .with_context(|| format!("closure root {} missing from rewrite map", closure_root.display()))?;
-    Ok(ReplaceResult { new_root, grafted })
+        .with_context(|| format!("closure root {} missing from resolved map", closure_root.display()))?;
+    Ok(ReplaceResult { new_root })
 }
 
 /// The parts of a `replace` invocation that stay constant across the whole
-/// recursive walk, bundled so `rewrite_one` doesn't need one parameter per
-/// option.
+/// walk, bundled so `classify`/`build_one` don't need one parameter per
+/// option. Shared read-only across worker threads during the parallel
+/// build phase — every field is `Sync` (no interior mutability), so no
+/// locking is needed.
 struct Ctx<'a> {
     explicit: &'a HashMap<PathBuf, PathBuf>,
     cutoffs: &'a HashSet<PathBuf>,
@@ -154,12 +250,133 @@ struct Ctx<'a> {
     full_rebuild: bool,
 }
 
+#[derive(Clone)]
+enum Category {
+    /// A literal `--replace` target: resolves to this path directly, never
+    /// recursed into further.
+    Explicit(PathBuf),
+    /// Never touched, no matter what changed beneath it.
+    Cutoff,
+    /// No direct or transitive reference changed; resolves to itself.
+    Unchanged,
+    /// Needs a blind NAR byte-substitution.
+    NeedsGraft,
+    /// Needs a real dependency substitution + sandboxed rebuild.
+    NeedsRebuild,
+}
+
+#[derive(Clone)]
+struct Node {
+    category: Category,
+    /// Meaningful only for `NeedsGraft`/`NeedsRebuild`: `1 +` the highest
+    /// level among direct references that themselves need a build. Two
+    /// nodes at the same level are provably independent — neither can be a
+    /// (transitive) reference of the other, since that would force its
+    /// level strictly higher — so a whole level's builds can run in
+    /// parallel with no risk of one needing the other's not-yet-built result.
+    level: usize,
+}
+
+/// Memoized classification: what `path` resolves to (via [`Category`]) and,
+/// for anything needing a build, its dependency level for scheduling.
+/// Precedence mirrors [`replace`]'s doc comment: explicit > cutoff >
+/// default. Recursion stops at a cutoff without even inspecting its own
+/// references, matching what a cutoff means.
+fn classify(path: &Path, ctx: &Ctx, memo: &mut HashMap<PathBuf, Node>) -> Result<Node> {
+    if let Some(n) = memo.get(path) {
+        return Ok(n.clone());
+    }
+    let node = if let Some(new) = ctx.explicit.get(path) {
+        log::v(format!("{} is an explicit replacement target -> {}", path.display(), new.display()));
+        Node { category: Category::Explicit(new.clone()), level: 0 }
+    } else if ctx.cutoffs.contains(path) {
+        log::v(format!("{}: cutoff, left as-is (not checking its references)", path.display()));
+        Node { category: Category::Cutoff, level: 0 }
+    } else {
+        let mut max_dep_level = 0;
+        let mut any_changed = false;
+        for r in store::references(path)? {
+            let rn = classify(&r, ctx, memo)?;
+            match &rn.category {
+                Category::Explicit(_) => any_changed = true,
+                Category::NeedsGraft | Category::NeedsRebuild => {
+                    any_changed = true;
+                    max_dep_level = max_dep_level.max(rn.level);
+                }
+                Category::Cutoff | Category::Unchanged => {}
+            }
+        }
+        if any_changed {
+            let use_rebuild = (ctx.full_rebuild || ctx.force_rebuild.contains(path)) && !ctx.force_graft.contains(path);
+            Node {
+                category: if use_rebuild { Category::NeedsRebuild } else { Category::NeedsGraft },
+                level: max_dep_level + 1,
+            }
+        } else {
+            log::v(format!("{}: no changed references, left as-is", path.display()));
+            Node { category: Category::Unchanged, level: 0 }
+        }
+    };
+    memo.insert(path.to_path_buf(), node.clone());
+    Ok(node)
+}
+
+fn tally_of(nodes: &HashMap<PathBuf, Node>) -> Tally {
+    let mut t = Tally::default();
+    for node in nodes.values() {
+        match node.category {
+            Category::Explicit(_) => t.explicit += 1,
+            Category::Cutoff => t.cutoff += 1,
+            Category::Unchanged => t.unchanged += 1,
+            Category::NeedsGraft => t.grafted += 1,
+            Category::NeedsRebuild => t.rebuilt += 1,
+        }
+    }
+    t
+}
+
+/// `path`'s direct references already classified as themselves changing —
+/// the identities `rebuild::unlocatable_dependencies` needs to check
+/// feasibility against, for `--dry-run`'s reporting.
+fn changed_refs_of(path: &Path, nodes: &HashMap<PathBuf, Node>) -> Result<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    for r in store::references(path)? {
+        if let Some(n) = nodes.get(&r) {
+            if !matches!(n.category, Category::Cutoff | Category::Unchanged) {
+                out.push(r);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Graft or rebuild `path` for the parallel build phase: looks up each
+/// direct reference's already-resolved value (guaranteed present — by
+/// construction, every direct reference is either resolved with no build at
+/// all, or was classified at a strictly lower level, already merged into
+/// `resolved` before this level started) and dispatches to the same
+/// `graft_path`/`rebuild_path` the old single-threaded walk used.
+fn build_one(path: &Path, use_rebuild: bool, resolved: &HashMap<PathBuf, PathBuf>, ctx: &Ctx) -> Result<PathBuf> {
+    let all_refs: Vec<(PathBuf, PathBuf)> = store::references(path)?
+        .into_iter()
+        .map(|r| {
+            let new_r = resolved.get(&r).cloned().unwrap_or_else(|| r.clone());
+            (r, new_r)
+        })
+        .collect();
+    if use_rebuild {
+        rebuild::rebuild_path(path, &all_refs, ctx.nix_args)
+    } else {
+        graft_path(path, &all_refs, ctx.nix_args)
+    }
+}
+
 /// Whether `path`, or anything it transitively references, is an explicit
 /// replacement target (`false` for a `cutoffs` member regardless — that's
-/// what a cutoff means). Mirrors `rewrite_one`'s real precedence (explicit >
-/// cutoff > default); takes `explicit`/`cutoffs` directly rather than a
-/// whole `Ctx` since `--interactive` needs this result before
-/// `force_rebuild`/`force_graft` are finalized.
+/// what a cutoff means). Used only by `--interactive`'s discovery step,
+/// which runs *before* `cutoffs`/`force_rebuild`/`force_graft` are
+/// finalized — `classify` can't be used there since it depends on those
+/// being final.
 fn would_change(
     path: &Path,
     explicit: &HashMap<PathBuf, PathBuf>,
@@ -189,6 +406,7 @@ fn would_change(
 
 /// `path`'s direct references that would themselves change — the identities
 /// `rebuild::unlocatable_dependencies` needs to check feasibility against.
+/// Same caveat as [`would_change`]: pre-finalization use only.
 fn changed_direct_refs(
     path: &Path,
     explicit: &HashMap<PathBuf, PathBuf>,
@@ -363,62 +581,6 @@ fn interactive_select(
         bail!("one or more paths from the original list are missing — lines must not be deleted");
     }
     Ok(())
-}
-
-/// Memoized post-order rewrite: dependencies are rewritten before the paths
-/// that reference them, so grafting a path can always assume its changed
-/// references already point at real, final store paths.
-fn rewrite_one(
-    path: &Path,
-    ctx: &Ctx,
-    memo: &mut HashMap<PathBuf, PathBuf>,
-    grafted: &mut Vec<(PathBuf, PathBuf)>,
-) -> Result<PathBuf> {
-    if let Some(p) = memo.get(path) {
-        return Ok(p.clone());
-    }
-    // Explicit replacements are trusted as-is, not recursed into further.
-    if let Some(new) = ctx.explicit.get(path) {
-        log::v(format!("{} is an explicit replacement target -> {}", path.display(), new.display()));
-        memo.insert(path.to_path_buf(), new.clone());
-        return Ok(new.clone());
-    }
-    // Left as-is unconditionally — not even its own references are checked.
-    if ctx.cutoffs.contains(path) {
-        log::v(format!("{}: cutoff, left as-is (not checking its references)", path.display()));
-        memo.insert(path.to_path_buf(), path.to_path_buf());
-        return Ok(path.to_path_buf());
-    }
-    // Every direct reference, rewritten (or mapped to itself if unaffected).
-    let mut all_refs = Vec::new();
-    let mut any_changed = false;
-    for r in store::references(path)? {
-        let rewritten = rewrite_one(&r, ctx, memo, grafted)?;
-        any_changed |= rewritten != r;
-        all_refs.push((r, rewritten));
-    }
-    let result = if !any_changed {
-        log::v(format!("{}: no changed references, left as-is", path.display()));
-        path.to_path_buf()
-    } else {
-        let use_rebuild = (ctx.full_rebuild || ctx.force_rebuild.contains(path)) && !ctx.force_graft.contains(path);
-        let changed_count = all_refs.iter().filter(|(o, n)| o != n).count();
-        log::v(format!(
-            "{}: {changed_count} changed reference(s), {} -> building",
-            path.display(),
-            if use_rebuild { "rebuilding" } else { "grafting" }
-        ));
-        let new_path = if use_rebuild {
-            rebuild::rebuild_path(path, &all_refs, ctx.nix_args)?
-        } else {
-            graft_path(path, &all_refs, ctx.nix_args)?
-        };
-        log::v(format!("{} -> {}", path.display(), new_path.display()));
-        grafted.push((path.to_path_buf(), new_path.clone()));
-        new_path
-    };
-    memo.insert(path.to_path_buf(), result.clone());
-    Ok(result)
 }
 
 /// Graft `path` by building a tiny synthetic derivation whose builder does

@@ -524,3 +524,264 @@ open(path, 'w').write('\n'.join(out) + '\n')
         "expected the rebuild-rejection error, got: {stderr}"
     );
 }
+
+#[test]
+fn replace_accepts_file_hash_attr_installables_without_prebuilding() {
+    // No `nix_build()` calls here at all — closure-root and both sides of
+    // --replace are given as installables and must be built by graft itself.
+    let fixture = fixture_path().display().to_string();
+    let old_inst = format!("{fixture}#oldDep");
+    let new_inst = format!("{fixture}#newDep");
+    let consumer_inst = format!("{fixture}#consumer");
+
+    let output = graft(
+        &["replace", &consumer_inst, "--replace", &format!("{old_inst}={new_inst}")],
+        None,
+    );
+    assert!(
+        output.status.success(),
+        "graft replace with installables failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let grafted = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+    let run = Command::new(format!("{grafted}/bin/consumer")).output().expect("failed to run grafted consumer");
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "got new dependency");
+}
+
+#[test]
+fn nixos_system_defaults_to_profile_without_switching() {
+    let old = nix_build("systemLikeOldDep");
+    let new = nix_build("systemLikeNewDep");
+    let system = nix_build("systemLike");
+
+    let profile_dir = tempfile::tempdir().unwrap();
+    let profile_path = profile_dir.path().join("system");
+    std::os::unix::fs::symlink(&system, &profile_path).unwrap();
+
+    let output = graft(
+        &[
+            "nixos-system",
+            "--profile",
+            profile_path.to_str().unwrap(),
+            "--replace",
+            &format!("{old}={new}"),
+        ],
+        None,
+    );
+    assert!(
+        output.status.success(),
+        "graft nixos-system failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let grafted = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    assert_ne!(grafted, system);
+
+    // Without --switch, nothing should have run switch-to-configuration or
+    // touched the profile symlink — just report what to do manually.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("not switching") && stderr.contains("switch-to-configuration switch"),
+        "expected manual-activation instructions, got: {stderr}"
+    );
+    assert_eq!(fs::read_link(&profile_path).unwrap(), PathBuf::from(&system), "profile symlink must be untouched");
+
+    let run = Command::new(format!("{grafted}/bin/dependency")).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "got new dependency");
+}
+
+#[test]
+fn nixos_system_switch_registers_the_profile_and_runs_switch_to_configuration() {
+    let old = nix_build("systemLikeOldDep");
+    let new = nix_build("systemLikeNewDep");
+    let system = nix_build("systemLike");
+
+    let profile_dir = tempfile::tempdir().unwrap();
+    let profile_path = profile_dir.path().join("system");
+    std::os::unix::fs::symlink(&system, &profile_path).unwrap();
+    let marker = tempfile::NamedTempFile::new().unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_graft"));
+    cmd.args([
+        "nixos-system",
+        "--profile",
+        profile_path.to_str().unwrap(),
+        "--replace",
+        &format!("{old}={new}"),
+        "--switch",
+        "test",
+    ]);
+    cmd.env("GRAFT_TEST_SWITCH_MARKER", marker.path());
+    let output = cmd.output().expect("failed to run graft nixos-system --switch");
+    assert!(
+        output.status.success(),
+        "graft nixos-system --switch test failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let grafted = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+    // switch-to-configuration must have actually run, with the right action...
+    let marker_contents = fs::read_to_string(marker.path()).expect("switch-to-configuration should have run");
+    assert_eq!(marker_contents.trim(), "called with: test");
+
+    // ...and nix-env --set must have repointed the profile at the new generation.
+    let resolved = fs::canonicalize(&profile_path).unwrap();
+    assert_eq!(resolved, PathBuf::from(&grafted));
+}
+
+#[test]
+fn replace_grafts_a_real_elf_binarys_embedded_rpath() {
+    // Every other fixture is a shell script or plain text; this is the only
+    // one exercising actual machine code and NUL bytes, closing a real gap
+    // in what the sed-based rewrite had ever been tested against.
+    let old_lib = nix_build("binOldLib");
+    let new_lib = nix_build("binNewLib");
+    let consumer = nix_build("binConsumer");
+    assert_eq!(
+        old_lib.rsplit('/').next().unwrap().len(),
+        new_lib.rsplit('/').next().unwrap().len(),
+        "fixture invariant: binOldLib/binNewLib must have equal-length basenames"
+    );
+
+    let run_orig = Command::new(format!("{consumer}/bin/consumer")).output().expect("failed to run original consumer");
+    assert_eq!(String::from_utf8_lossy(&run_orig.stdout).trim(), "answer: 1");
+
+    let output = graft(&["replace", &consumer, "--replace", &format!("{old_lib}={new_lib}")], None);
+    assert!(
+        output.status.success(),
+        "graft replace on a real ELF binary failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let grafted = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    assert_ne!(grafted, consumer);
+
+    // The dynamic linker must actually follow the rewritten RUNPATH/RPATH —
+    // this only passes if the ELF bytes were rewritten correctly, not just
+    // "didn't crash".
+    let run = Command::new(format!("{grafted}/bin/consumer")).output().expect("failed to run grafted consumer");
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout).trim(),
+        "answer: 2",
+        "grafted binary should dynamically link against the new library and print its answer"
+    );
+
+    let refs = nix_store_references(&grafted);
+    assert!(refs.contains(&new_lib), "grafted binary should reference the new library: {refs:?}");
+    assert!(!refs.contains(&old_lib), "grafted binary should not reference the old library: {refs:?}");
+}
+
+#[test]
+fn replace_warns_when_old_is_not_in_the_closure() {
+    let old = nix_build("oldDep");
+    let new = nix_build("newDep");
+    let unrelated_root = nix_build("chainTop");
+
+    let output = graft(&["replace", &unrelated_root, "--replace", &format!("{old}={new}")], None);
+    assert!(
+        output.status.success(),
+        "replace should still succeed, just warn: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    assert_eq!(result, unrelated_root, "closure root should be unchanged since old was never referenced");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("not in the closure of") && stderr.contains("no effect"),
+        "expected the no-op warning, got: {stderr}"
+    );
+}
+
+#[test]
+fn replace_out_link_creates_a_gc_root_symlink() {
+    let old = nix_build("oldDep");
+    let new = nix_build("newDep");
+    let consumer = nix_build("consumer");
+
+    let link_dir = tempfile::tempdir().unwrap();
+    let link_path = link_dir.path().join("result");
+
+    let output = graft(
+        &[
+            "replace",
+            &consumer,
+            "--replace",
+            &format!("{old}={new}"),
+            "--out-link",
+            link_path.to_str().unwrap(),
+        ],
+        None,
+    );
+    assert!(
+        output.status.success(),
+        "graft replace --out-link failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let grafted = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+    let resolved = fs::canonicalize(&link_path).expect("--out-link should have created a resolvable symlink");
+    assert_eq!(resolved, PathBuf::from(&grafted), "the out-link should point at the grafted result");
+}
+
+#[test]
+fn dry_run_does_not_create_an_out_link() {
+    let old = nix_build("oldDep");
+    let new = nix_build("newDep");
+    let consumer = nix_build("consumer");
+
+    let link_dir = tempfile::tempdir().unwrap();
+    let link_path = link_dir.path().join("result");
+
+    let output = graft(
+        &[
+            "replace",
+            &consumer,
+            "--replace",
+            &format!("{old}={new}"),
+            "--out-link",
+            link_path.to_str().unwrap(),
+            "--dry-run",
+        ],
+        None,
+    );
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(!link_path.exists(), "--dry-run must not create an out-link even if --out-link is given");
+}
+
+#[test]
+fn replace_grafts_two_independent_nodes_at_the_same_level_in_parallel() {
+    // parMidA/parMidB each need grafting (their own leaf was replaced) but
+    // neither depends on the other, so they're provably independent and
+    // should land in the same parallel batch.
+    let a = nix_build("parLeafA");
+    let a2 = nix_build("parLeafAV2");
+    let b = nix_build("parLeafB");
+    let b2 = nix_build("parLeafBV2");
+    let top = nix_build("parallelTop");
+
+    let output = graft(
+        &["-v", "replace", &top, "--replace", &format!("{a}={a2}"), "--replace", &format!("{b}={b2}")],
+        None,
+    );
+    assert!(
+        output.status.success(),
+        "graft replace with two independent chains failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let grafted = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    assert_ne!(grafted, top);
+
+    let run = Command::new(format!("{grafted}/bin/parallel-top")).output().expect("failed to run grafted parallel-top");
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(stdout.contains("a v2") && stdout.contains("b v2"), "both chains should reach the new leaf: {stdout}");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("level 1: building 2 path(s) in parallel"),
+        "parMidA and parMidB should batch into the same parallel level: {stderr}"
+    );
+    assert!(
+        stderr.contains("3 grafted") && stderr.contains("2 explicit replacement"),
+        "expected parMidA/parMidB/parallelTop grafted (3) plus the 2 explicit leaf targets, got: {stderr}"
+    );
+}

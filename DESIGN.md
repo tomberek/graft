@@ -357,6 +357,47 @@ Feeds the same `(old, new)` into `replace`.
   rewrite it anyway. Store path basenames are high-entropy 32-character
   hashes, so collisions are astronomically unlikely, but this is a
   fundamentally unverified rewrite, not a semantically-aware one.
+- **`sed` matches the full basename; Nix's own scanner matches the bare
+  hash alone — narrower than it needs to be.** Read directly out of
+  `~/nix/src/libstore/references.cc`'s `search()` function (the real
+  implementation the daemon's post-build reference scan uses): it walks the
+  raw byte stream looking for any 32-character run that's valid
+  nix32-alphabet (`BaseNix32::lookupReverse`) *and* present in the candidate
+  hash set — with no requirement that a `-` or a name follows.
+  `StorePath::HashLen = 32` confirms the window size matches this tool's own
+  `HASH_LEN`. Two things this confirms, one
+  reassuring and one not: the scan operates on the *printable base32 text*
+  of the hash, not some other binary encoding, so `sed`'s literal-string
+  substitution is matching the right representation and is naturally
+  binary-safe (the scanner itself is a raw byte-level `std::string_view`
+  walk with no line/NUL handling at all, carrying a `tail` buffer
+  specifically so a hash split across two read chunks is still found — the
+  exact same reason `graft_path`'s dump/sed/restore pipeline never had a
+  binary-safety problem worth expecting). But `graft_path`'s `sed_expr`
+  substitutes the full `hash-name-version` string
+  (`store::basename`), not the bare hash — so a reference embedded as *just*
+  the 32-character hash with no name suffix following it (which Nix's own
+  scanner explicitly still counts, per the code above) would be missed by
+  our rewrite and left as stale bytes in the grafted output. Not a
+  regression versus precedent — nixpkgs's `replaceDirectDependencies` has
+  the identical narrower match — but worth being precise about: we are not
+  matching "the same hashes Nix itself would look for" in full generality,
+  only the common case where the full basename string appears.
+  `RewritingSink`'s own `assert(from.size() == to.size())` (used internally
+  by Nix for self-reference masking) is independent confirmation that this
+  tool's equal-length constraint is the same invariant Nix's own C++
+  rewriting relies on, not something specific to this prototype.
+- **Verified against real compiled binary content, not just text.** Every
+  other fixture in `tests/fixtures/scenario.nix` is a shell script or plain
+  text — `writeShellScriptBin`/`writeTextFile`/`runCommand` with no compiler
+  involved — which never exercised the actual risk case above (embedded
+  NUL bytes, an ELF `.dynamic` section, machine code around the reference
+  string). `binOldLib`/`binNewLib`/`binConsumer` are real `cc`-compiled ELF
+  objects: a shared library referenced through a genuine linker-emitted
+  `RUNPATH` entry, confirmed via `readelf -d` to contain the literal store
+  path. Grafting it and actually *running* the result (rather than just
+  checking it exists) is what proves the rewrite is byte-correct against
+  real binary content, not only against this project's own text fixtures.
 - **No SONAME/ABI check.** Guix's manual explicitly warns that grafting a
   shared library requires matching `SONAME` and binary compatibility; this
   tool doesn't check either — that's on the caller.
@@ -577,3 +618,175 @@ registration file). The tool cannot tell these apart from the symptom alone,
 so any such fallback has to stay an explicit, loudly-logged choice the user
 makes (`--force-graft`, or picking `graft`/`g` in `--interactive`) — never
 automatic.
+
+## 8. Accepting installables, not just store paths
+
+Every earlier example required both sides of `--replace` (and
+`closure-root`) to already be built store paths — meaning a first-time user
+had to run `nix build` twice themselves, by hand, before graft could do
+anything. That's a real ergonomics gap: Guix users never see a hash, since
+grafting is driven by a `replacement` field on a package, not a CLI argument.
+`src/installable.rs`'s `resolve` closes most of that gap without touching
+Guix's actual mechanism (a declarative field) — it just lets every
+path-taking CLI argument (`closure-root`, both sides of `--replace`, `edit
+drv`'s/`edit file`'s `path`) accept anything `nix build` itself accepts (a
+flake reference, a `.drv` path) or a legacy `file.nix`/`file.nix#attr`
+expression installable, building it via `derivation::nix_build` if it isn't
+already realized.
+
+One subtlety this had to get right: a store-path-*shaped* string (starts
+with `/nix/store/`) is returned completely unvalidated — not canonicalized,
+not existence-checked, not run through `nix build` — deferring entirely to
+whatever the caller already does with it. Two reasons this matters, both
+caught by the existing test suite rather than reasoned out in advance:
+
+- **`replace`'s syntax-before-existence ordering.** `replace()` deliberately
+  checks `--replace`'s basename-length constraint *before* requiring either
+  side to exist (see §4/caveats — this is what lets it reject a bogus pair
+  fast, without touching the store). `--replace old=old-longer-name` where
+  `old-longer-name` was never built is exactly this test case: resolving it
+  eagerly (via `nix build` or even just `canonicalize`) turns a clean
+  "basenames differ in length" rejection into a confusing "don't know how to
+  build this path" error, since the existence check now happens *before*
+  `replace()` ever gets to run its own syntax check. Passing store-path-shaped
+  strings through untouched preserves the original ordering exactly.
+- **`edit drv`'s bare-`.drv` + `--output` disambiguation.** A bare `.drv`
+  path for a multi-output derivation, combined with `--output <name>`, is
+  meant to let `edit_drv::run` pick a specific output *after* the fact via
+  `derivation::locate_output`. Running that `.drv` path through `nix build`
+  during resolution would both build it prematurely and collapse the
+  disambiguation this flag exists for (a bare `nix build <drv>` with no
+  `^output` builds every output, not the one you asked for). Verified
+  directly against the `multiOut` fixture: `edit drv <out> <drv> --output
+  extra` still resolves the `extra` output specifically, not `out`.
+
+Everything that isn't store-path-shaped goes through two branches: a
+`#`-split first component that exists on disk and ends in `.nix` is treated
+as a legacy `-f file.nix [attr]` installable (matching `edit_nix.rs`'s own
+long-standing installable parsing, which `resolve` doesn't replace — `edit
+nix` still has its own narrower parser, since it distinguishes "already
+built" from "needs building" for a different reason); everything else is
+handed to `nix build` as-is, covering flake references and anything else the
+modern CLI resolves natively. `derivation::nix_build` — the actual `nix
+build ... --no-link --print-out-paths` subprocess call, streaming stderr
+live — is shared by `resolve`, `derivation::realise`, and `edit_nix::build`,
+which previously each had their own near-identical copy of the same
+spawn/capture/parse logic.
+
+## 9. `graft nixos-system`: the other half of "patch what's running"
+
+§8 removed the "pre-build both sides yourself" friction; the other big
+ergonomics gap next to Guix is that grafting a live *system* still required
+already knowing `/run/current-system` or `/nix/var/nix/profiles/system`
+exists and typing it out. `src/nixos_system.rs` is a thin wrapper around
+`replace`: same strategy flags, same engine, just defaulted to
+`/nix/var/nix/profiles/system` — the same profile `nixos-rebuild` itself
+operates on — instead of a required `closure-root` argument.
+
+`--profile` is deliberately dual-purpose rather than two separate flags: it's
+both *what closure to read* (resolved through `installable::resolve` exactly
+like a `result`-style symlink into the store) and, if `--switch` is given,
+*what `nix-env --set` registers the result into* afterward. Keeping it one
+flag means it's always the same profile being read and written — pointing
+`--profile` at a different generation, or a mounted image's system closure,
+changes both consistently instead of risking a mismatch between "what I
+read" and "what I updated."
+
+`--switch test|switch|boot` (same action names as `nixos-rebuild`, so
+there's nothing new to learn) is opt-in and does two things in sequence
+after a successful graft: `nix-env --profile <profile> --set <new-root>`,
+then `<new-root>/bin/switch-to-configuration <action>`. Without it, nothing
+on the system changes — `run` just prints the new path plus the exact two
+commands needed to apply it manually. This split (report vs. mutate) exists
+because activating a system is a materially riskier operation than grafting
+one (per this project's own risk-awareness policy, matching the reasoning in
+§5/caveats around blind text substitution): a user should have to ask for it
+explicitly, not get it as a side effect of asking "what would this graft."
+
+Tested via fixture substitution rather than a real NixOS system (this
+project's own dev environment isn't NixOS): `tests/fixtures/scenario.nix`'s
+`systemLike` derivation exposes a stub `bin/switch-to-configuration` that
+records how it was called, and the test points `--profile` at a plain
+symlink in a tempdir rather than the real default — `installable::resolve`
+treats a hand-made symlink and a `nix-env`-managed profile identically
+(both are just a path resolving to a store path), so this exercises the
+exact same code as the real default would, including confirming `nix-env
+--set` actually repoints the profile symlink at the graft's result.
+
+## 10. From one recursive walk to level-based parallel batches
+
+The original `rewrite_one` was a single memoized recursive function: decide
+what `path` resolves to, recursing into its own references first, grafting
+or rebuilding inline, one path at a time. That's simple and was correct, but
+it's also strictly sequential — every `nix build` call for every affected
+path in the whole closure ran one after another, even when two paths had no
+relationship to each other at all.
+
+`replace()` now splits this into two passes:
+
+1. **`classify`** — the same recursion `would_change`/`rewrite_one` used to
+   do, but returning a `Node { category, level }` instead of just a bool or
+   an already-rewritten path. `category` is exactly the five outcomes the
+   old code implicitly had (`Explicit`, `Cutoff`, `Unchanged`, `NeedsGraft`,
+   `NeedsRebuild`); `level` is new: `1 + max(level of every direct reference
+   that itself needs a build)`, with `Explicit` references contributing `0`
+   (they resolve immediately, no build to wait for) and `Cutoff`/`Unchanged`
+   references not contributing at all. This is a completely ordinary
+   longest-path-from-a-leaf leveling, which gives exactly the property that
+   makes parallelism safe: **two nodes at the same level are provably
+   independent** — if one were a transitive reference of the other, that
+   would force its level strictly higher, by the `1 + max(...)` construction
+   itself. No separate independence check is needed; it falls out of how
+   levels are defined.
+2. **Level-by-level parallel execution** — bucket every `NeedsGraft`/
+   `NeedsRebuild` path by its level into a `BTreeMap<usize, Vec<PathBuf>>`
+   (ordered, so levels process low to high), then for each level spawn one
+   `std::thread::scope` thread per path, all reading the *same* `resolved:
+   HashMap<PathBuf, PathBuf>` built up so far. This is safe with zero
+   locking: every reference a level-N path needs is guaranteed already in
+   `resolved` before level N starts (it's either non-building, seeded
+   upfront, or itself at a strictly lower level, already merged), and
+   nothing mutates `resolved` again until every thread in the *current*
+   level has been joined — a hard barrier between levels, not a lock around
+   shared state. `graft_path`/`rebuild_path` themselves are completely
+   unchanged; only how they're scheduled is different.
+
+No new dependency: `std::thread::scope` (stable since Rust 1.63) is enough,
+since the "work" being parallelized is spawning and waiting on `nix build`
+subprocesses, not CPU-bound Rust code.
+
+The same `classify` pass also answers "what happened, in aggregate" for
+free — `Tally` counts every category across the whole closure and
+`--dry-run`'s reporting loop was rewritten to read `Category` directly
+instead of recomputing a verb from `would_change`'s boolean, so both the
+prediction and the real run now share one source of truth for
+classification. The closing summary line ("N grafted, M rebuilt, K cutoff, J
+unchanged, I explicit replacement (T total)") is printed by `replace()`
+itself, matching the existing precedent that dry-run's per-path reporting is
+already direct `eprintln!` from inside the engine — real runs now follow
+the identical pattern, including labeling each per-path line "grafted" or
+"rebuilt" correctly (the old code's main.rs-side loop always said "grafted"
+regardless of which strategy actually ran).
+
+One correctness gap closed alongside this, not the point of the change:
+`replace()` now warns explicitly when an `old` from `--replace` isn't in
+`closure_root`'s closure at all, rather than silently doing nothing —
+checked once, right after the closure is computed, against the full
+`closure_paths` list.
+
+## 11. `--out-link` and `--version`
+
+Every build in this tool passes `--no-link` (see `derivation::nix_build`) —
+deliberately, since the tool constructs and discards many intermediate
+synthetic derivations per run and doesn't want a `result` symlink for each
+one. The side effect: nothing produced here, including the *final* result,
+was ever a GC root. A collection between a successful run and whatever the
+caller does next could remove it. `--out-link <path>` (`derivation::
+add_out_link`, `nix build <target> --out-link <path>`) roots the final
+`new_root` on request — off by default (matching today's behavior exactly
+when omitted), skipped under `--dry-run` (nothing new was built, so nothing
+to root), and available on every subcommand via `StrategyArgs`.
+
+`--version` was simply missing — `#[command(version)]` on the `Cli` struct
+is all `clap`'s `Parser` derive needs to read it from `Cargo.toml`; it
+doesn't do this automatically without being asked.

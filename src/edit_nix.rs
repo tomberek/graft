@@ -1,9 +1,8 @@
 use crate::replace::{ReplaceOptions, ReplaceResult};
-use crate::{editor, log, replace, store};
+use crate::{derivation, editor, log, replace, store};
 use anyhow::{bail, Context, Result};
-use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 /// Best-effort: record `installable`'s current output, open `$EDITOR` on the
 /// `.nix` file backing it, rebuild just that attribute, and graft the result
@@ -63,38 +62,9 @@ fn current_output(file: &Path, attr: Option<&str>) -> Result<PathBuf> {
 }
 
 fn build(file: &Path, attr: Option<&str>, nix_args: &[String]) -> Result<PathBuf> {
-    let mut cmd = Command::new("nix");
-    cmd.args(["build", "-f"]).arg(file);
+    let mut args = vec!["-f".to_string(), file.display().to_string()];
     if let Some(a) = attr {
-        cmd.arg(a);
+        args.push(a.to_string());
     }
-    cmd.args(["--no-link", "--print-out-paths"]).args(nix_args);
-    log::v(format!(
-        "running: nix build -f {}{} --no-link --print-out-paths{}",
-        file.display(),
-        attr.map(|a| format!(" {a}")).unwrap_or_default(),
-        if nix_args.is_empty() { String::new() } else { format!(" {}", nix_args.join(" ")) }
-    ));
-    // Inherit stderr so build logs stream live; only stdout needs capturing.
-    let mut child = cmd
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .context("failed to spawn `nix build -f`")?;
-    let mut stdout = String::new();
-    child
-        .stdout
-        .take()
-        .expect("piped stdout")
-        .read_to_string(&mut stdout)
-        .context("failed to read output of `nix build -f`")?;
-    let status = child.wait().context("nix build -f did not exit")?;
-    if !status.success() {
-        bail!("nix build -f {} failed (see build output above)", file.display());
-    }
-    stdout
-        .lines()
-        .next()
-        .map(|l| PathBuf::from(l.trim()))
-        .with_context(|| format!("nix build -f {} produced no output path", file.display()))
+    derivation::nix_build(&args, nix_args)
 }

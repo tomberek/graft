@@ -375,38 +375,66 @@ fn full_store_path(raw: &str) -> PathBuf {
     }
 }
 
-/// Builds `drv`'s `output_name` output via `nix build <drv>^<output_name>
-/// --no-link --print-out-paths`. `nix_args` are forwarded verbatim, e.g.
-/// `-Lv`, `--builders ssh://...`.
+/// Builds `drv`'s `output_name` output via `nix build <drv>^<output_name>`.
+/// `nix_args` are forwarded verbatim, e.g. `-Lv`, `--builders ssh://...`.
 pub fn realise(drv: &Path, output_name: &str, nix_args: &[String]) -> Result<PathBuf> {
-    let installable = format!("{}^{output_name}", drv.display());
+    nix_build(&[format!("{}^{output_name}", drv.display())], nix_args)
+}
+
+/// Runs `nix build <build_args...> --no-link --print-out-paths <nix_args...>`
+/// and returns the first printed output path. Shared by [`realise`],
+/// `edit_nix`'s attribute rebuild, and installable resolution — all three
+/// are "ask `nix build` for an output path" with a different installable.
+pub fn nix_build(build_args: &[String], nix_args: &[String]) -> Result<PathBuf> {
+    let mut args: Vec<&str> = vec!["build"];
+    args.extend(build_args.iter().map(String::as_str));
+    args.push("--no-link");
+    args.push("--print-out-paths");
     log::v(format!(
-        "running: nix build {installable} --no-link --print-out-paths{}",
+        "running: nix {}{}",
+        args.join(" "),
         if nix_args.is_empty() { String::new() } else { format!(" {}", nix_args.join(" ")) }
     ));
     // Inherit stderr so build logs stream live; only --print-out-paths's
     // stdout (the result) needs capturing.
     let mut child = Command::new("nix")
-        .args(["build", &installable, "--no-link", "--print-out-paths"])
+        .args(&args)
         .args(nix_args)
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()
-        .with_context(|| format!("failed to spawn nix build {installable}"))?;
+        .with_context(|| format!("failed to spawn nix {}", args.join(" ")))?;
     let mut stdout = String::new();
     child
         .stdout
         .take()
         .expect("piped stdout")
         .read_to_string(&mut stdout)
-        .with_context(|| format!("failed to read output of nix build {installable}"))?;
-    let status = child.wait().with_context(|| format!("nix build {installable} did not exit"))?;
+        .with_context(|| format!("failed to read output of nix {}", args.join(" ")))?;
+    let status = child.wait().with_context(|| format!("nix {} did not exit", args.join(" ")))?;
     if !status.success() {
-        bail!("nix build {installable} failed (see build output above)");
+        bail!("nix {} failed (see build output above)", args.join(" "));
     }
     stdout
         .lines()
         .next()
         .map(|l| PathBuf::from(l.trim()))
-        .with_context(|| format!("nix build {installable} produced no output"))
+        .with_context(|| format!("nix {} produced no output", args.join(" ")))
+}
+
+/// Creates (or replaces) a GC-root symlink at `link` pointing at `target`,
+/// via `nix build <target> --out-link <link>` — a real registered root, not
+/// just a plain symlink, and the same mechanism `nix build -o` itself uses.
+/// Every build this tool does otherwise passes `--no-link`, so without this
+/// nothing produced here is protected from a concurrent garbage collection.
+pub fn add_out_link(target: &Path, link: &Path) -> Result<()> {
+    log::v(format!("running: nix build {} --out-link {}", target.display(), link.display()));
+    let status = Command::new("nix")
+        .args(["build", &target.display().to_string(), "--out-link", &link.display().to_string()])
+        .status()
+        .with_context(|| format!("failed to spawn nix build {} --out-link {}", target.display(), link.display()))?;
+    if !status.success() {
+        bail!("nix build {} --out-link {} failed", target.display(), link.display());
+    }
+    Ok(())
 }
