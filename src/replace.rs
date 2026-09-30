@@ -298,25 +298,26 @@ fn build_report_nodes(
     nodes: &HashMap<PathBuf, Node>,
     resolved: Option<&HashMap<PathBuf, PathBuf>>,
 ) -> Result<Vec<report::ReportNode>> {
-    let included: HashSet<&PathBuf> = nodes
-        .iter()
-        .filter(|(_, n)| !matches!(n.category, Category::Cutoff | Category::Unchanged))
-        .map(|(p, _)| p)
-        .collect();
+    // `Cutoff` is a deliberate decision worth showing (part of the graft's
+    // story: "propagation stopped here, on purpose") — only `Unchanged`
+    // ("nothing happened here") is genuine noise.
+    let included: HashSet<&PathBuf> = nodes.iter().filter(|(_, n)| !matches!(n.category, Category::Unchanged)).map(|(p, _)| p).collect();
     let mut out = Vec::new();
     for (path, node) in nodes {
         if !included.contains(path) {
             continue;
         }
-        let (label, color, new_path) = match &node.category {
-            Category::Explicit(new) => ("explicit replacement", "#2563eb", Some(new.clone())),
-            Category::NeedsGraft => ("grafted", "#16a34a", resolved.and_then(|r| r.get(path).cloned())),
-            Category::NeedsRebuild => ("rebuilt", "#ea580c", resolved.and_then(|r| r.get(path).cloned())),
-            Category::Cutoff | Category::Unchanged => unreachable!("filtered out above"),
+        let (label, color, new_path, diffable) = match &node.category {
+            Category::Explicit(new) => ("explicit replacement", "#2563eb", Some(new.clone()), true),
+            Category::NeedsGraft => ("grafted", "#16a34a", resolved.and_then(|r| r.get(path).cloned()), true),
+            Category::NeedsRebuild => ("rebuilt", "#ea580c", resolved.and_then(|r| r.get(path).cloned()), true),
+            // Resolves to itself by definition — nothing to diff against.
+            Category::Cutoff => ("cutoff", "#6b7280", Some(path.clone()), false),
+            Category::Unchanged => unreachable!("filtered out above"),
         };
         let depends_on = store::references(path)?.into_iter().filter(|r| included.contains(r)).collect();
 
-        let (nix_diff, diffoscope_html) = if report_diff {
+        let (nix_diff, diffoscope_html) = if report_diff && diffable {
             diffs_for(dir, path, new_path.as_deref(), matches!(node.category, Category::NeedsGraft))
         } else {
             (None, None)

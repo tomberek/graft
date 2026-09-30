@@ -838,13 +838,19 @@ scheduling `level` (§10), reused directly for vertical position. That's not
 a coincidence worth glossing over: "which nodes could build at the same
 time" and "which nodes make sense to draw on the same row of a dependency
 diagram" are the same question, so the same data answers both. Only
-`Explicit`/`NeedsGraft`/`NeedsRebuild` nodes are included — `Cutoff`/
-`Unchanged` are deliberately excluded, since a real closure's unchanged
-majority is noise for a report meant to answer "what did this graft do,"
-not a graph of the whole closure. Edges are drawn only between two *included*
-nodes (a node's direct references that also made the cut), so the graph
-shows the actual "story" subgraph, not a mess of everything each node
-happens to depend on.
+`Unchanged` is excluded — a real closure's unchanged majority is genuine
+noise for a report meant to answer "what did this graft do," not a graph
+of the whole closure. `Cutoff` is deliberately *kept*, even though it's
+never built: cutting a path off is a decision the caller made on purpose
+(`--cutoff`/`--force-graft`/`--force-rebuild` are exactly "override the
+default here"), not nothing happening — a report that silently dropped it
+would hide the one place propagation was stopped on purpose, which is
+precisely the kind of thing a report should be confirming actually worked.
+Shown in gray, old and new paths identical (it really does resolve to
+itself), with no diff generated against itself even under `--report-diff`.
+Edges are drawn only between two *included* nodes (a node's direct
+references that also made the cut), so the graph shows the actual "story"
+subgraph, not a mess of everything each node happens to depend on.
 
 One real bug caught by actually looking at the rendered output, not just
 checking the HTML was well-formed: the first version styled node labels as

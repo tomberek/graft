@@ -846,6 +846,41 @@ fn report_html_includes_every_changed_node_and_excludes_unchanged_ones() {
 }
 
 #[test]
+fn report_html_shows_cutoff_nodes_but_still_excludes_unchanged_ones() {
+    let old = nix_build("chainLeaf");
+    let new = nix_build("chainLeafV2");
+    let mid = nix_build("chainMid");
+    let top = nix_build("chainTop");
+
+    let report_dir = tempfile::tempdir().unwrap();
+    let output = graft(
+        &[
+            "replace",
+            &top,
+            "--replace",
+            &format!("{old}={new}"),
+            "--cutoff",
+            &mid,
+            "--report",
+            report_dir.path().to_str().unwrap(),
+        ],
+        None,
+    );
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+
+    let html = fs::read_to_string(report_dir.path().join("index.html")).unwrap();
+    // The cutoff itself is a deliberate decision worth showing...
+    assert!(html.contains("cutoff"), "expected the cutoff tag to appear: {html}");
+    assert!(html.contains(&mid), "expected the cut-off node itself to appear in the report: {html}");
+    // ...but `top`, left genuinely unchanged because the cutoff stopped
+    // propagation before it, is still noise and must stay excluded from
+    // the table (its path legitimately still appears in the page header,
+    // as the unchanged closure root/new root — that's expected).
+    assert_eq!(html.matches("<tr><td>").count(), 2, "expected exactly 2 table rows (leaf, mid), got:\n{html}");
+    assert!(!html.contains(&format!("<td>{}</td>", top.rsplit('/').next().unwrap())), "top must not be a table row: {html}");
+}
+
+#[test]
 fn report_html_under_dry_run_shows_pending_instead_of_a_built_path() {
     let old = nix_build("oldDep");
     let new = nix_build("newDep");
