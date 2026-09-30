@@ -14,7 +14,20 @@
           default = pkgs.mkShell {
             # bash/gnused must be store paths (declarable as derivation
             # inputs); the ambient /usr/bin/bash isn't.
-            packages = [ pkgs.cargo pkgs.rustc pkgs.rustfmt pkgs.clippy pkgs.nix pkgs.bash pkgs.gnused ];
+            # nix-diff/diffoscope are diagnostic tooling for `--report-diff`,
+            # not core functionality — dev-shell only, not in the packaged
+            # binary's wrapped PATH.
+            packages = [
+              pkgs.cargo
+              pkgs.rustc
+              pkgs.rustfmt
+              pkgs.clippy
+              pkgs.nix
+              pkgs.bash
+              pkgs.gnused
+              pkgs.nix-diff
+              pkgs.diffoscope
+            ];
           };
         });
 

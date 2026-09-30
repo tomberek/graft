@@ -1,4 +1,5 @@
 mod derivation;
+mod diff;
 mod edit_drv;
 mod edit_file;
 mod edit_nix;
@@ -71,6 +72,12 @@ struct StrategyArgs {
     /// Works under `--dry-run` too.
     #[arg(long)]
     report: Option<PathBuf>,
+    /// Embed nix-diff (derivation diff, where one applies) and diffoscope
+    /// (built-artifact diff) output per node in the report. Only
+    /// meaningful alongside `--report`; real per-node subprocess cost, so
+    /// it's a separate flag rather than implied by `--report` alone.
+    #[arg(long)]
+    report_diff: bool,
 }
 
 impl StrategyArgs {
@@ -84,6 +91,7 @@ impl StrategyArgs {
             force_graft: &self.force_graft_paths,
             interactive: self.interactive,
             report: self.report.as_deref(),
+            report_diff: self.report_diff,
         }
     }
 }

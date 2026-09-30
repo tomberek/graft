@@ -858,35 +858,51 @@ the full hash prefix under every node made even a 5-node graph visually
 noisy for no informational gain the details table (which does show full
 paths) doesn't already provide better.
 
-### Next step, not yet built: embedding `nix-diff`/`diffoscope`
+### `--report-diff`: embedding `nix-diff`/`diffoscope`
 
-The report currently shows *that* something changed and *what* it resolved
-to, not *why* — no derivation-level or content-level diff yet. The natural
-extension, and the concrete resolution to what was previously a vague
-"add a `--diff` flag" idea:
+The base report shows *that* something changed and *what* it resolved to,
+not *why*. `--report-diff` (meaningful only alongside `--report`, rejected
+otherwise — `replace()` checks this before doing anything else) adds both:
 
-- **`nix-diff`** (structural derivation diff) is only meaningful where a
-  derivation genuinely changed — `Explicit` targets (why the old package is
-  being replaced: version, patches, hash) and `NeedsRebuild` nodes (exactly
-  what got substituted in `inputs.drvs`/`env`/`args`). It has nothing useful
-  to say about a `NeedsGraft` node: grafting never touches the recipe, only
-  the built bytes, so the old and new derivers are identical — this is the
-  concrete answer to "what's the graft-mode diff story," previously an open
-  question. `nix-diff`'s output is colored terminal text, not HTML; simplest
-  first cut is capturing its plain-text form into a `<pre>` block rather
-  than converting ANSI to HTML spans (a real but separable nice-to-have).
-- **`diffoscope`** (content/artifact diff) applies uniformly wherever both
-  an old and a new *path* are known (`Explicit`, and `NeedsGraft`/
-  `NeedsRebuild` once built — not under `--dry-run`, where the new path is
-  only `(pending)`). Already has its own `--html <file>` output mode, so
-  the integration is "shell out, link to the file it wrote" — no HTML
-  generation of our own needed for this part.
-- Both are real subprocess costs per node, unlike the base report (pure
-  in-memory string formatting) — this should be a separate opt-in flag
-  (e.g. `--report-diff`, meaningful only alongside `--report`), not bundled
-  into `--report` unconditionally, so asking for the quick graph never
-  implies an unexpected per-node diffoscope run.
-- Needs `pkgs.nix-diff`/`pkgs.diffoscope` added to `flake.nix`'s devShell,
-  and — matching how every other subprocess-driving test in this project
-  works — a stub-script test (same pattern as `stub_editor`) rather than
-  requiring the real tools for `cargo test` to pass.
+- **`nix-diff`** (`src/diff.rs::nix_diff`, `nix-diff <old> <new> --color
+  never`) only for `Explicit` and `NeedsRebuild` nodes — the concrete
+  resolution to "what's the graft-mode diff story": grafting never touches
+  the recipe, only the built bytes, so a `NeedsGraft` node's old and new
+  derivers are identical and there's nothing for `nix-diff` to show.
+  Confirmed empirically before writing the wrapper: `nix-diff` always exits
+  `0` regardless of whether the derivations differ — unlike `diffoscope`
+  below, its exit code carries no signal, so a nonzero exit here is a
+  genuine invocation error, not "differences found." Embedded as a plain
+  `<pre>` inside a collapsed `<details>` per row (its output is colored
+  terminal text, not HTML; converting ANSI to HTML spans would be a real
+  but separable nice-to-have over plain text).
+- **`diffoscope`** (`src/diff.rs::diffoscope_html`) for any node with both
+  an old and a *built* new path — not under `--dry-run`, where it's still
+  `(pending)`. Uses diffoscope's own `--html <file>` mode directly (no HTML
+  generation of our own needed) and links to it from the table.
+
+Two real bugs surfaced only by actually running this against real
+derivations, not by reasoning about the code:
+
+- The report directory didn't exist yet when `diffoscope_html` tried to
+  write into it — `report::write` only created it right before writing
+  `index.html`, *after* the per-node diff pass that needs it already ran.
+  Diffoscope doesn't create its own output directory, so this failed with a
+  raw Python traceback, not a clean error. Fixed by creating the directory
+  in `write_report_if_requested` before any diffing happens.
+- `diffoscope`'s exit code alone can't distinguish "differences found"
+  (exit `1`, intended) from "diffoscope crashed" (also exit `1`, confirmed
+  empirically via the bug above's own traceback) — so `diffoscope_html`
+  also checks that the output file actually exists before treating exit `1`
+  as success. Exit code plus a real artifact, not exit code alone.
+
+Every per-node diff failure is best-effort, not fatal to the report as a
+whole (`replace.rs::diffs_for`): a missing tool, a path with no known
+deriver, or a genuine diffoscope failure just omits that one node's diff
+(logged under `-v`) rather than failing an otherwise-successful graft.
+`pkgs.nix-diff`/`pkgs.diffoscope` are dev-shell-only in `flake.nix`
+(diagnostic tooling, not core functionality — not in the packaged binary's
+wrapped `PATH`), and tests run against the real tools rather than stubs,
+matching this project's existing testing philosophy: every other test here
+drives real `nix build`/`nix-store`, not fakes, and `nix-diff`/`diffoscope`
+are no more special-cased than those.

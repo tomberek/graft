@@ -19,6 +19,15 @@ pub struct ReportNode {
     /// target's real output isn't known until it's actually built).
     pub new_path: Option<PathBuf>,
     pub depends_on: Vec<PathBuf>,
+    /// `--report-diff`'s plain-text `nix-diff` output, if requested and
+    /// applicable — only for `Explicit`/`NeedsRebuild` nodes, since
+    /// grafting never changes the derivation there's nothing to diff.
+    pub nix_diff: Option<String>,
+    /// `--report-diff`'s `diffoscope --html` report, if requested and a
+    /// built new path was available — a filename relative to this same
+    /// report directory, not a full path (diffoscope's own output lives
+    /// alongside `index.html`).
+    pub diffoscope_html: Option<String>,
 }
 
 /// Writes `<dir>/index.html`: a self-contained (no external assets, no
@@ -100,15 +109,23 @@ fn render(closure_root: &Path, new_root: &Path, dry_run: bool, summary: &str, no
 
     let mut rows_html = String::new();
     for n in nodes {
+        let mut diff_cell = String::new();
+        if let Some(text) = &n.nix_diff {
+            let _ = write!(diff_cell, "<details><summary>nix-diff</summary><pre>{}</pre></details>", escape(text));
+        }
+        if let Some(file) = &n.diffoscope_html {
+            let _ = write!(diff_cell, r#"<a href="{}" target="_blank">diffoscope</a>"#, escape(file));
+        }
         let _ = writeln!(
             rows_html,
             "<tr><td>{}</td><td><span class=\"tag\" style=\"background:{}\">{}</span></td>\
-             <td class=\"mono\">{}</td><td class=\"mono\">{}</td></tr>",
+             <td class=\"mono\">{}</td><td class=\"mono\">{}</td><td>{}</td></tr>",
             escape(&short_name(&n.path)),
             n.color,
             n.label,
             escape(&n.path.display().to_string()),
             n.new_path.as_ref().map(|p| escape(&p.display().to_string())).unwrap_or_else(|| "(pending)".to_string()),
+            diff_cell,
         );
     }
 
@@ -126,6 +143,9 @@ fn render(closure_root: &Path, new_root: &Path, dry_run: bool, summary: &str, no
   svg {{ background: #fafafa; border: 1px solid #eee; border-radius: 8px; margin-top: 1rem; }}
   .node text {{ fill: #333; font-weight: 600; font-size: 11px; pointer-events: none; }}
   .node circle {{ stroke: rgba(0,0,0,0.15); stroke-width: 1; }}
+  pre {{ background: #f5f5f5; padding: 0.6rem; border-radius: 6px; overflow-x: auto; font-size: 0.78rem; }}
+  details summary {{ cursor: pointer; color: #2563eb; font-size: 0.82rem; }}
+  td a {{ color: #2563eb; font-size: 0.82rem; margin-left: 0.5rem; }}
 </style></head>
 <body>
 <h1>graft report{}</h1>
@@ -138,7 +158,7 @@ fn render(closure_root: &Path, new_root: &Path, dry_run: bool, summary: &str, no
   {svg_nodes}
 </svg>
 <table>
-  <tr><th>path</th><th>strategy</th><th>old</th><th>new</th></tr>
+  <tr><th>path</th><th>strategy</th><th>old</th><th>new</th><th>diff</th></tr>
   {rows_html}
 </table>
 </body></html>"##,

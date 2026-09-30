@@ -1,4 +1,4 @@
-use crate::{derivation, editor, log, rebuild, report, store};
+use crate::{derivation, diff, editor, log, rebuild, report, store};
 use anyhow::{bail, Context, Result};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -64,6 +64,9 @@ pub struct ReplaceOptions<'a> {
     /// Works under `--dry-run` too — anything not yet built just shows as
     /// "(pending)" instead of a concrete new path.
     pub report: Option<&'a Path>,
+    /// Embed `nix-diff`/`diffoscope` output per node in the report. Only
+    /// meaningful alongside `report` — `replace()` rejects it alone.
+    pub report_diff: bool,
 }
 
 /// Replace all of `old` with `new` (for each pair in `replacements`), in the
@@ -75,6 +78,9 @@ pub struct ReplaceOptions<'a> {
 /// `--replace` target wins over a cutoff, which wins over the default
 /// strategy — the same order nixpkgs documents for its own equivalent.
 pub fn replace(closure_root: &Path, replacements: &[(PathBuf, PathBuf)], opts: &ReplaceOptions) -> Result<ReplaceResult> {
+    if opts.report_diff && opts.report.is_none() {
+        bail!("--report-diff has no effect without --report <dir>");
+    }
     // Syntactic checks first, before requiring anything to exist on disk.
     store::require_output_path(closure_root)?;
     for (old, new) in replacements {
@@ -277,13 +283,21 @@ fn write_report_if_requested(
     tally: &Tally,
 ) -> Result<()> {
     let Some(dir) = opts.report else { return Ok(()) };
-    let report_nodes = build_report_nodes(nodes, resolved)?;
+    // Created here, before any diffoscope call — diffoscope doesn't create
+    // its own output directory and fails with a raw traceback if it's missing.
+    std::fs::create_dir_all(dir).with_context(|| format!("failed to create report directory {}", dir.display()))?;
+    let report_nodes = build_report_nodes(dir, opts.report_diff, nodes, resolved)?;
     let index = report::write(dir, closure_root, new_root, opts.dry_run, &tally.summarize(), &report_nodes)?;
     eprintln!("wrote report to {}", index.display());
     Ok(())
 }
 
-fn build_report_nodes(nodes: &HashMap<PathBuf, Node>, resolved: Option<&HashMap<PathBuf, PathBuf>>) -> Result<Vec<report::ReportNode>> {
+fn build_report_nodes(
+    dir: &Path,
+    report_diff: bool,
+    nodes: &HashMap<PathBuf, Node>,
+    resolved: Option<&HashMap<PathBuf, PathBuf>>,
+) -> Result<Vec<report::ReportNode>> {
     let included: HashSet<&PathBuf> = nodes
         .iter()
         .filter(|(_, n)| !matches!(n.category, Category::Cutoff | Category::Unchanged))
@@ -301,9 +315,55 @@ fn build_report_nodes(nodes: &HashMap<PathBuf, Node>, resolved: Option<&HashMap<
             Category::Cutoff | Category::Unchanged => unreachable!("filtered out above"),
         };
         let depends_on = store::references(path)?.into_iter().filter(|r| included.contains(r)).collect();
-        out.push(report::ReportNode { path: path.clone(), label, color, level: node.level, new_path, depends_on });
+
+        let (nix_diff, diffoscope_html) = if report_diff {
+            diffs_for(dir, path, new_path.as_deref(), matches!(node.category, Category::NeedsGraft))
+        } else {
+            (None, None)
+        };
+
+        out.push(report::ReportNode { path: path.clone(), label, color, level: node.level, new_path, depends_on, nix_diff, diffoscope_html });
     }
     Ok(out)
+}
+
+/// Best-effort per-node diffs for `--report-diff`: never fails the whole
+/// report over one node's diff tooling — a missing `nix-diff`/`diffoscope`,
+/// or a path with no known deriver, just means that node's diff is omitted
+/// (logged under `-v`), not a hard error for an otherwise-successful graft.
+fn diffs_for(dir: &Path, path: &Path, new_path: Option<&Path>, is_graft: bool) -> (Option<String>, Option<String>) {
+    let Some(new_path) = new_path else { return (None, None) };
+
+    // Grafting never changes the derivation — nothing for nix-diff to show.
+    let nix_diff = if is_graft {
+        None
+    } else {
+        match (derivation::deriver_of(path), derivation::deriver_of(new_path)) {
+            (Ok(old_drv), Ok(new_drv)) => match diff::nix_diff(&old_drv, &new_drv) {
+                Ok(text) => Some(text),
+                Err(e) => {
+                    log::v(format!("nix-diff for {} skipped: {e}", path.display()));
+                    None
+                }
+            },
+            _ => {
+                log::v(format!("nix-diff for {} skipped: no known deriver on one or both sides", path.display()));
+                None
+            }
+        }
+    };
+
+    let file_name = format!("diffoscope-{}.html", store::basename(path).unwrap_or_else(|_| "unknown".to_string()));
+    let out_html = dir.join(&file_name);
+    let diffoscope_html = match diff::diffoscope_html(path, new_path, &out_html) {
+        Ok(()) => Some(file_name),
+        Err(e) => {
+            log::v(format!("diffoscope for {} skipped: {e}", path.display()));
+            None
+        }
+    };
+
+    (nix_diff, diffoscope_html)
 }
 
 /// The parts of a `replace` invocation that stay constant across the whole

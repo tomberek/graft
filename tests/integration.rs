@@ -870,3 +870,61 @@ fn report_html_under_dry_run_shows_pending_instead_of_a_built_path() {
     assert!(html.contains("(dry run)"), "expected the dry-run marker in the report title");
     assert!(html.contains("(pending)"), "expected the not-yet-built consumer to show as pending, not a real path");
 }
+
+#[test]
+fn report_diff_without_report_is_rejected() {
+    let old = nix_build("oldDep");
+    let new = nix_build("newDep");
+    let consumer = nix_build("consumer");
+
+    let output = graft(&["replace", &consumer, "--replace", &format!("{old}={new}"), "--report-diff"], None);
+    assert!(!output.status.success(), "--report-diff without --report should be rejected");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--report-diff has no effect without --report"));
+}
+
+#[test]
+fn report_diff_embeds_nix_diff_for_explicit_targets_but_not_grafted_ones() {
+    // `leaf` is the explicit --replace target (a real derivation diff
+    // exists to show); `mid`/`top` are grafted (no derivation change, so
+    // no nix-diff — only diffoscope, which applies to any built old/new pair).
+    let old = nix_build("chainLeaf");
+    let new = nix_build("chainLeafV2");
+    let top = nix_build("chainTop");
+
+    let report_dir = tempfile::tempdir().unwrap();
+    let output = graft(
+        &[
+            "replace",
+            &top,
+            "--replace",
+            &format!("{old}={new}"),
+            "--report",
+            report_dir.path().to_str().unwrap(),
+            "--report-diff",
+        ],
+        None,
+    );
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+
+    let html = fs::read_to_string(report_dir.path().join("index.html")).unwrap();
+    assert!(html.contains("nix-diff"), "expected a nix-diff block for the explicit target: {html}");
+    assert!(
+        html.matches("diffoscope</a>").count() == 3,
+        "expected a diffoscope link for all 3 changed nodes (leaf, mid, top): {html}"
+    );
+
+    // Exactly one nix-diff block (the explicit target) — mid/top (grafted)
+    // must not get one, since grafting never changes the derivation.
+    assert_eq!(html.matches("<summary>nix-diff</summary>").count(), 1, "expected exactly one nix-diff block: {html}");
+
+    let diffoscope_files: Vec<_> = fs::read_dir(report_dir.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().starts_with("diffoscope-"))
+        .collect();
+    assert_eq!(diffoscope_files.len(), 3, "expected 3 diffoscope HTML files on disk, found: {diffoscope_files:?}");
+    for f in &diffoscope_files {
+        let content = fs::read_to_string(f.path()).unwrap();
+        assert!(content.contains("<!DOCTYPE html>"), "expected a real diffoscope HTML report at {:?}", f.path());
+    }
+}

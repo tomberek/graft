@@ -86,6 +86,11 @@ Useful flags (all repeatable where noted):
   by strategy, laid out by the same level a path was scheduled at) plus a
   details table of everything grafted, rebuilt, or explicitly replaced.
   Self-contained, no CDN. Works under `--dry-run` too.
+- `--report-diff` (needs `--report`) — embed `nix-diff` (why an explicit
+  replacement or rebuild differs — not shown for plain grafts, since
+  grafting never changes the derivation) and link each node's `diffoscope`
+  artifact diff. Needs `nix-diff`/`diffoscope` on `PATH` (in this project's
+  own `nix develop` shell already).
 - `-- <nix args>` — anything after a literal `--` is forwarded to the
   underlying `nix build` calls (e.g. `-- -Lv --builders ''`).
 
