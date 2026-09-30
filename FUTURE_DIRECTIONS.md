@@ -110,3 +110,71 @@ for reading the `exportReferencesGraph`-supplied registration file, and swap
 `inputs.drvs` instead of building it. Everything else — `would_change`,
 `rewrite_one`, `substitute_dependency`, `add_with_retry` — carries over
 close to unchanged.
+
+## Replacing by package name instead of exact store path
+
+**Status: designed, not started.** §8 of DESIGN.md let `--replace` accept
+installables instead of requiring a pre-built store path, but that still
+requires knowing *which* installable produces the exact thing already in
+the target closure. Guix users never see a hash at all — grafting is driven
+by a `replacement` field on a package. The natural next ergonomic step is
+letting `--replace` accept a bare package name and have graft find the
+right store path inside the closure itself.
+
+### Why naive "match by name, replace every match" is unsafe
+
+Two real complications, not just theoretical ones:
+
+- **Duplicates at genuinely different versions.** A closure can easily
+  contain both `openssl-1.1.1w` and `openssl-3.2.1` at once (something
+  pins the old one for compatibility while everything else moved on). If a
+  name search for `openssl` found both and replaced them both with the same
+  `new` value, that would silently apply a version-3 security fix to
+  whatever specifically needed version 1.1.1 — a much bigger, likely-wrong
+  change than the user asked for. "Replace every match" is only safe when
+  there's exactly one distinct match; in the general case it isn't.
+- **Wrappers don't hide the real dependency, but they do add noise.**
+  Worth being precise about what wrappers actually threaten here: a wrapped
+  consumer (`python3.11-env`, `symlinkJoin` outputs, etc.) still directly or
+  transitively *references* the real, normally-named `openssl-3.2.1` path —
+  references pass through wrappers fine, so a flat name search over the
+  closure's path list won't miss the real dependency because of wrapping.
+  The actual risk is the opposite: a flat name search can surface more than
+  one *legitimately different* match (a build-time-only artifact, an
+  unrelated environment that happens to share a name, a genuinely different
+  version) with no principled way to auto-pick between them from the name
+  string alone.
+
+Both complications point the same direction: resolving a name to a single
+store path is exactly the place ambiguity has to be surfaced loudly, not
+guessed through.
+
+### The refined design
+
+Don't make "replace by name" an operation that decides what to touch on its
+own. Once you have one exact `old` store path, `replace()`'s existing engine
+already does the hard part correctly — it floods that identity through
+every reference to it, however many times, wherever in the closure. The only
+missing piece is a *safe way to find that one exact path* — so keep the
+scope to exactly that:
+
+- **`graft find <closure-root> <name>`** — a read-only search subcommand.
+  Lists every distinct `(pname, version, output)` match in the closure, each
+  with its full store path and enough context to tell them apart (at least
+  one direct consumer, so "which occurrence is this" has an answer). Zero
+  risk, since it only prints information.
+- **`--replace-name <name>=<new>`** — sugar over `--replace`, not a
+  different mechanism. Resolves `name` against the closure; succeeds only
+  if exactly one distinct match exists. If there's more than one, it refuses
+  and prints the same candidate list `graft find` would, pointing the user
+  at an exact `--replace <old>=<new>` instead of guessing.
+- Matching should extract `pname` properly (strip the version suffix)
+  rather than doing a raw substring match on the full `name-version`
+  string — a substring match would both false-positive (`openssl` matching
+  `libopenssl-thing`) and be brittle across version-string formats. Letting
+  the user supply `pname-version` directly (e.g. `openssl-3.2.1`) should
+  also work, to disambiguate multiple versions without a separate `find`
+  step first.
+
+This is a discovery/UX layer only — no change to the core replace engine,
+and no new way to silently touch more than one distinct thing at once.
