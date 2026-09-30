@@ -14,7 +14,6 @@ pub struct ReportNode {
     pub path: PathBuf,
     pub label: &'static str,
     pub color: &'static str,
-    pub level: usize,
     /// `None` under `--dry-run` for anything not yet built (a graft/rebuild
     /// target's real output isn't known until it's actually built).
     pub new_path: Option<PathBuf>,
@@ -31,11 +30,9 @@ pub struct ReportNode {
 }
 
 /// Writes `<dir>/index.html`: a self-contained (no external assets, no
-/// CDN, no build step) static report — a dependency graph laid out by
-/// level (reusing exactly the scheduling levels `replace()` already
-/// computes for parallel batching, since that's already the right shape
-/// for "what could happen at once") plus a details table. Returns the
-/// written file's path.
+/// CDN, no build step) static report — a dependency graph laid out by row
+/// (each row: `1 +` the deepest row among a node's own *included* direct
+/// references) plus a details table. Returns the written file's path.
 pub fn write(dir: &Path, closure_root: &Path, new_root: &Path, dry_run: bool, summary: &str, nodes: &[ReportNode]) -> Result<PathBuf> {
     fs::create_dir_all(dir).with_context(|| format!("failed to create report directory {}", dir.display()))?;
     let index = dir.join("index.html");
@@ -55,19 +52,48 @@ fn graph_label(p: &Path) -> String {
     store::store_name(p).unwrap_or_else(|_| short_name(p))
 }
 
+/// A node's row in the graph — deliberately *not* the same thing as its
+/// `--rebuild` scheduling level (which is always `0` for `Explicit`/
+/// `Cutoff`, since neither needs a build to wait for; using it directly
+/// for layout put every cutoff/explicit target on the graph's bottom row
+/// regardless of how deep it actually was, which looked backwards for
+/// anything cut off partway up a chain). Computed fresh from the same
+/// `depends_on` edges the graph already draws, so every category — not
+/// just the ones that get scheduled — lands on a row that reflects its
+/// real place in the graph: `1 +` the deepest *included* direct reference.
+fn graph_row<'a>(path: &'a Path, by_path: &HashMap<&'a Path, &'a ReportNode>, memo: &mut HashMap<&'a Path, u32>) -> u32 {
+    if let Some(&d) = memo.get(&path) {
+        return d;
+    }
+    let node = by_path[&path];
+    let d = node
+        .depends_on
+        .iter()
+        .filter(|r| by_path.contains_key(r.as_path()))
+        .map(|r| graph_row(r.as_path(), by_path, memo))
+        .max()
+        .map_or(0, |m| m + 1);
+    memo.insert(path, d);
+    d
+}
+
 fn render(closure_root: &Path, new_root: &Path, dry_run: bool, summary: &str, nodes: &[ReportNode]) -> String {
     const ROW_HEIGHT: u32 = 90;
     const COL_WIDTH: u32 = 170;
     const NODE_RADIUS: u32 = 28;
 
-    let max_level = nodes.iter().map(|n| n.level).max().unwrap_or(0);
-    let mut by_level: Vec<Vec<&ReportNode>> = (0..=max_level).map(|_| Vec::new()).collect();
+    let by_path: HashMap<&Path, &ReportNode> = nodes.iter().map(|n| (n.path.as_path(), n)).collect();
+    let mut row_memo = HashMap::new();
+    let rows: HashMap<&Path, u32> = nodes.iter().map(|n| (n.path.as_path(), graph_row(n.path.as_path(), &by_path, &mut row_memo))).collect();
+
+    let max_level = rows.values().copied().max().unwrap_or(0);
+    let mut by_level: Vec<Vec<&ReportNode>> = (0..=max_level as usize).map(|_| Vec::new()).collect();
     for n in nodes {
-        by_level[n.level].push(n);
+        by_level[rows[n.path.as_path()] as usize].push(n);
     }
     let widest_row = by_level.iter().map(Vec::len).max().unwrap_or(1).max(1) as u32;
     let width = widest_row * COL_WIDTH + COL_WIDTH;
-    let height = (max_level as u32 + 1) * ROW_HEIGHT + ROW_HEIGHT;
+    let height = (max_level + 1) * ROW_HEIGHT + ROW_HEIGHT;
 
     let mut pos: HashMap<&Path, (u32, u32)> = HashMap::new();
     for (level, row) in by_level.iter().enumerate() {

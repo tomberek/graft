@@ -323,7 +323,7 @@ fn build_report_nodes(
             (None, None)
         };
 
-        out.push(report::ReportNode { path: path.clone(), label, color, level: node.level, new_path, depends_on, nix_diff, diffoscope_html });
+        out.push(report::ReportNode { path: path.clone(), label, color, new_path, depends_on, nix_diff, diffoscope_html });
     }
     Ok(out)
 }

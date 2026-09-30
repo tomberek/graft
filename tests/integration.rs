@@ -880,6 +880,54 @@ fn report_html_shows_cutoff_nodes_but_still_excludes_unchanged_ones() {
     assert!(!html.contains(&format!("<td>{}</td>", top.rsplit('/').next().unwrap())), "top must not be a table row: {html}");
 }
 
+/// A node's `<circle cy="...">` y-coordinate, found via the exact store
+/// path inside its `<title>` tooltip — lower y is drawn higher on the page.
+fn node_cy(html: &str, path: &str) -> i64 {
+    let needle = format!("<title>{path}");
+    let idx = html.find(&needle).unwrap_or_else(|| panic!("no node found for {path} in report:\n{html}"));
+    let before = &html[..idx];
+    let cy_start = before.rfind("cy=\"").expect("no cy=\"...\" attribute found before this node's title") + 4;
+    let cy_end = before[cy_start..].find('"').expect("unterminated cy attribute") + cy_start;
+    before[cy_start..cy_end].parse().expect("cy attribute should be a plain integer")
+}
+
+#[test]
+fn report_html_rows_a_cutoff_node_above_the_dependency_it_left_untouched() {
+    // Regression test: a cutoff's *scheduling* level is always 0 (it's
+    // never built), but its *graph row* must reflect its real depth —
+    // `mid` (cut off) depends on `leaf` (the explicit target one level
+    // below it), so `mid` must be drawn strictly above `leaf`, not on the
+    // same row as it.
+    let old = nix_build("chainLeaf");
+    let new = nix_build("chainLeafV2");
+    let mid = nix_build("chainMid");
+    let top = nix_build("chainTop");
+
+    let report_dir = tempfile::tempdir().unwrap();
+    let output = graft(
+        &[
+            "replace",
+            &top,
+            "--replace",
+            &format!("{old}={new}"),
+            "--cutoff",
+            &mid,
+            "--report",
+            report_dir.path().to_str().unwrap(),
+        ],
+        None,
+    );
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+
+    let html = fs::read_to_string(report_dir.path().join("index.html")).unwrap();
+    let leaf_y = node_cy(&html, &old);
+    let mid_y = node_cy(&html, &mid);
+    assert!(
+        mid_y < leaf_y,
+        "cutoff node `mid` (cy={mid_y}) should be drawn above the dependency it left untouched, `leaf` (cy={leaf_y})"
+    );
+}
+
 #[test]
 fn report_html_under_dry_run_shows_pending_instead_of_a_built_path() {
     let old = nix_build("oldDep");
