@@ -398,6 +398,21 @@ Feeds the same `(old, new)` into `replace`.
   path. Grafting it and actually *running* the result (rather than just
   checking it exists) is what proves the rewrite is byte-correct against
   real binary content, not only against this project's own text fixtures.
+- **Verified against a real nixpkgs package, round-trip.** Every other
+  fixture, including the ELF one above, is built from scratch inside the
+  test suite — never an existing, independently-maintained nixpkgs
+  derivation with its own real build system and real transitive closure.
+  `replace_grafts_a_real_nixpkgs_package_then_ungrafts_it_back` grafts
+  `pigz` (a real nixpkgs package) against two real builds of `zlib` that
+  differ only in `ZLIB_VERSION` (a version-banner macro, not an
+  ABI-affecting one — same `SONAME`, same `libz.so.1` symlink, same
+  exported symbols), runs the grafted binary through an actual
+  compress/decompress round trip to prove it dynamically links the new
+  library correctly (not just that it starts), then grafts the result
+  *back* to the original `zlib` and asserts the ungrafted package's NAR is
+  byte-identical to the pre-graft original — confirming grafting is a
+  reversible, lossless operation on something real, not just on this
+  project's own synthetic fixtures.
 - **No SONAME/ABI check.** Guix's manual explicitly warns that grafting a
   shared library requires matching `SONAME` and binary compatibility; this
   tool doesn't check either — that's on the caller.

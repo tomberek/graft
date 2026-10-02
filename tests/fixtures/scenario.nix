@@ -160,4 +160,19 @@ let pkgs = import <nixpkgs> {}; in rec {
     ${parMidA}/bin/mid-a
     ${parMidB}/bin/mid-b
   '';
+
+  # A real nixpkgs package (pigz) with a real runtime dependency (zlib) —
+  # every other fixture here is hand-rolled (writeShellScriptBin, a two-line
+  # runCommand). `zlibB` is a cosmetic rebuild of the exact same zlib
+  # source with only `ZLIB_VERSION` patched (a version-banner macro, not an
+  # ABI-affecting one — zlib's SONAME, exported symbols, and `libz.so.1`
+  # symlink are untouched), so the graft is safe but the two outputs are
+  # genuinely distinguishable at runtime via `zlibVersion()`.
+  zlibA = pkgs.zlib;
+  zlibB = pkgs.zlib.overrideAttrs (old: {
+    postPatch = (old.postPatch or "") + ''
+      sed -i 's/#define ZLIB_VERSION "[^"]*"/#define ZLIB_VERSION "1.3.2-grafted"/' zlib.h
+    '';
+  });
+  pigzA = pkgs.pigz.override { zlib = zlibA; };
 }

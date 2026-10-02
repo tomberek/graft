@@ -671,6 +671,70 @@ fn replace_grafts_a_real_elf_binarys_embedded_rpath() {
 }
 
 #[test]
+fn replace_grafts_a_real_nixpkgs_package_then_ungrafts_it_back() {
+    // Every other test grafts a hand-rolled fixture; this one grafts an
+    // actual nixpkgs package (pigz) and its actual runtime dependency
+    // (zlib), then grafts the result back to the original dependency,
+    // checking the round trip reproduces the pre-graft package exactly.
+    let zlib_a = nix_build("zlibA");
+    let zlib_b = nix_build("zlibB");
+    let pigz_a = nix_build("pigzA");
+    assert!(nix_store_references(&pigz_a).contains(&zlib_a), "fixture invariant: pigzA must reference zlibA");
+
+    let compress_roundtrip = |pigz: &str| -> bool {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("data");
+        fs::write(&input, b"graft integration test payload, repeated. ".repeat(1000)).unwrap();
+        let archive = dir.path().join("data.gz");
+        let compress = Command::new(format!("{pigz}/bin/pigz"))
+            .args(["-k", "-c"])
+            .arg(&input)
+            .output()
+            .expect("failed to run pigz to compress");
+        assert!(compress.status.success(), "pigz compress failed: {}", String::from_utf8_lossy(&compress.stderr));
+        fs::write(&archive, &compress.stdout).unwrap();
+        let decompress = Command::new(format!("{pigz}/bin/pigz"))
+            .args(["-d", "-c"])
+            .arg(&archive)
+            .output()
+            .expect("failed to run pigz to decompress");
+        assert!(decompress.status.success(), "pigz decompress failed: {}", String::from_utf8_lossy(&decompress.stderr));
+        decompress.stdout == fs::read(&input).unwrap()
+    };
+    assert!(compress_roundtrip(&pigz_a), "original pigz should round-trip compress/decompress correctly");
+
+    let grafted_output = graft(&["replace", &pigz_a, "--replace", &format!("{zlib_a}={zlib_b}")], None);
+    assert!(
+        grafted_output.status.success(),
+        "graft replace on a real nixpkgs package failed: {}",
+        String::from_utf8_lossy(&grafted_output.stderr)
+    );
+    let grafted = String::from_utf8_lossy(&grafted_output.stdout).trim().to_string();
+    assert_ne!(grafted, pigz_a);
+
+    let grafted_refs = nix_store_references(&grafted);
+    assert!(grafted_refs.contains(&zlib_b), "grafted pigz should reference the new zlib: {grafted_refs:?}");
+    assert!(!grafted_refs.contains(&zlib_a), "grafted pigz should not reference the old zlib: {grafted_refs:?}");
+    assert!(compress_roundtrip(&grafted), "grafted pigz should still round-trip compress/decompress correctly");
+
+    let ungrafted_output = graft(&["replace", &grafted, "--replace", &format!("{zlib_b}={zlib_a}")], None);
+    assert!(
+        ungrafted_output.status.success(),
+        "ungraft (replacing back to the original zlib) failed: {}",
+        String::from_utf8_lossy(&ungrafted_output.stderr)
+    );
+    let ungrafted = String::from_utf8_lossy(&ungrafted_output.stdout).trim().to_string();
+
+    let ungrafted_refs = nix_store_references(&ungrafted);
+    assert!(ungrafted_refs.contains(&zlib_a), "ungrafted pigz should reference the original zlib again: {ungrafted_refs:?}");
+    assert!(!ungrafted_refs.contains(&zlib_b), "ungrafted pigz should not reference the new zlib: {ungrafted_refs:?}");
+    assert!(compress_roundtrip(&ungrafted), "ungrafted pigz should still round-trip compress/decompress correctly");
+
+    let dump = |p: &str| Command::new("nix-store").args(["--dump", p]).output().expect("failed to run nix-store --dump").stdout;
+    assert_eq!(dump(&ungrafted), dump(&pigz_a), "grafting there and back should reproduce the original package's NAR exactly");
+}
+
+#[test]
 fn replace_warns_when_old_is_not_in_the_closure() {
     let old = nix_build("oldDep");
     let new = nix_build("newDep");
