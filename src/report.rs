@@ -53,14 +53,12 @@ fn graph_label(p: &Path) -> String {
 }
 
 /// A node's row in the graph — deliberately *not* the same thing as its
-/// `--rebuild` scheduling level (which is always `0` for `Explicit`/
-/// `Cutoff`, since neither needs a build to wait for; using it directly
-/// for layout put every cutoff/explicit target on the graph's bottom row
-/// regardless of how deep it actually was, which looked backwards for
-/// anything cut off partway up a chain). Computed fresh from the same
-/// `depends_on` edges the graph already draws, so every category — not
-/// just the ones that get scheduled — lands on a row that reflects its
-/// real place in the graph: `1 +` the deepest *included* direct reference.
+/// `--rebuild` scheduling level, which is always `0` for `Explicit`/
+/// `Cutoff` (neither needs a build to wait for) and would put every one of
+/// them on the graph's bottom row regardless of how deep it actually sits.
+/// Computed fresh from the same `depends_on` edges the graph already
+/// draws, so every category lands on a row reflecting its real place in
+/// the graph: `1 +` the deepest *included* direct reference.
 fn graph_row<'a>(path: &'a Path, by_path: &HashMap<&'a Path, &'a ReportNode>, memo: &mut HashMap<&'a Path, u32>) -> u32 {
     if let Some(&d) = memo.get(&path) {
         return d;

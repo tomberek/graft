@@ -426,14 +426,11 @@ pub fn nix_build(build_args: &[String], nix_args: &[String]) -> Result<PathBuf> 
 
 /// Builds several `<drv>^<output_name>` targets in a single `nix build`
 /// call, returning each one's output path keyed by `(drv, output_name)`.
-/// The point is bounding how many build subprocesses this tool spawns at
-/// once: a level of N independent grafts/rebuilds used to mean N threads
-/// each running their own `nix build`, with nothing capping N. Handing Nix
-/// one `nix build` call with all N targets instead lets its own
-/// daemon-side job scheduling (which already respects `--max-jobs`/
-/// `--cores`, forwarded via `nix_args` like everything else) bound real
-/// concurrency, the same way it already does for an ordinary multi-package
-/// `nix build`.
+/// One call for a whole level, rather than one subprocess per target, lets
+/// Nix's own daemon-side job scheduling (which already respects
+/// `--max-jobs`/`--cores`, forwarded via `nix_args` like everything else)
+/// bound real concurrency, the same way it already does for an ordinary
+/// multi-package `nix build`.
 pub fn build_many(targets: &[(PathBuf, String)], nix_args: &[String]) -> Result<HashMap<(PathBuf, String), PathBuf>> {
     if targets.is_empty() {
         return Ok(HashMap::new());

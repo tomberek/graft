@@ -43,10 +43,10 @@ as it happens plus a closing summary in the same spirit as Guix's own
 grafting output:
 
 ```
-grafted /nix/store/...-openssl-3.2.1 -> /nix/store/...-openssl-3.2.2
-grafted /nix/store/...-curl-8.9.0 -> /nix/store/...-curl-8.9.0
+grafted /nix/store/9f3a...-openssl-3.2.1 -> /nix/store/2b0e...-openssl-3.2.2
+grafted /nix/store/7c1d...-curl-8.9.0 -> /nix/store/a84f...-curl-8.9.0
 2 grafted, 1 explicit replacement, 54 unchanged (57 total)
-/nix/store/...-curl-8.9.0
+/nix/store/a84f...-curl-8.9.0
 ```
 
 Paths with no data dependency between them (neither is an ancestor of the
