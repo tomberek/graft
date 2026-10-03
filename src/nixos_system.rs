@@ -1,5 +1,5 @@
 use crate::replace::{ReplaceOptions, ReplaceResult};
-use crate::{installable, log, replace};
+use crate::{log, replace};
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -23,30 +23,22 @@ impl SwitchAction {
     }
 }
 
-/// `graft replace`, defaulted to a NixOS system profile instead of requiring
-/// the caller to already know its store path. `profile` doubles as both the
-/// closure to read (resolved the same way `/run/current-system`-style
-/// symlinks always have been) and, if `switch` is given, the profile
-/// `nix-env --set` registers the graft's result into — the same profile
-/// `nixos-rebuild` itself operates on.
+/// `graft replace`, with `closure_root` already resolved from `profile` and
+/// `replacements` already resolved from whatever mix of
+/// `--replace`/`--edit`/`--edit-drv`/`--edit-nix` was given — see
+/// `main.rs`'s `collect_pairs`. `profile` itself is still needed here,
+/// for `activate()`'s `nix-env --set`, which is the other half of what
+/// defaulting to a NixOS system profile means: not just reading its
+/// closure, but (if `switch` is given) registering the result back into
+/// that same profile, the same profile `nixos-rebuild` itself operates on.
 pub fn run(
     profile: &str,
-    replacements: &[(String, String)],
+    closure_root: &Path,
+    replacements: &[(PathBuf, PathBuf)],
     opts: &ReplaceOptions,
     switch: Option<SwitchAction>,
 ) -> Result<ReplaceResult> {
-    let closure_root = installable::resolve(profile, opts.nix_args).with_context(|| {
-        format!(
-            "failed to resolve `{profile}` — is this a NixOS system? Pass --profile <path> to \
-             target a different one (a specific generation, or a mounted image's system closure)"
-        )
-    })?;
-    let replacements: Vec<(PathBuf, PathBuf)> = replacements
-        .iter()
-        .map(|(old, new)| Ok((installable::resolve(old, opts.nix_args)?, installable::resolve(new, opts.nix_args)?)))
-        .collect::<Result<_>>()?;
-
-    let result = replace::replace(&closure_root, &replacements, opts)?;
+    let result = replace::replace(closure_root, replacements, opts)?;
     if opts.dry_run {
         return Ok(result);
     }

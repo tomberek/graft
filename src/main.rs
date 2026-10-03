@@ -13,10 +13,10 @@ mod replace;
 mod report;
 mod store;
 
-use anyhow::Result;
+use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
 use replace::ReplaceOptions;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Guix-style graft/rewrite prototype for the Nix store.
 #[derive(Parser)]
@@ -196,28 +196,55 @@ impl StrategyArgs {
     }
 }
 
+/// Every transform flag below produces one or more `(old, new)` pairs fed
+/// into the exact same closure walk — they differ only in *how* the pair
+/// is produced, so all four combine freely in a single invocation and
+/// graft together in one pass. Shared by `Replace` and `NixosSystem` since
+/// both end up calling [`collect_pairs`] with these same four fields.
+#[derive(Args)]
+struct TransformArgs {
+    /// Replace `old` with `new` throughout the closure. `old`/`new` are
+    /// installables, same forms as `closure-root`. May be repeated; may be
+    /// combined with --edit/--edit-drv/--edit-nix.
+    #[arg(long = "replace", num_args = 2, value_names = ["old", "new"])]
+    replace: Vec<String>,
+    /// Edit a file inside an already-built store path and graft the
+    /// result up through the closure. `subpath` is relative to `path`'s
+    /// own root; pass `.` for the whole tree. May be repeated; may be
+    /// combined with --replace/--edit-drv/--edit-nix.
+    #[arg(long = "edit", num_args = 2, value_names = ["path", "subpath"])]
+    edit: Vec<String>,
+    /// Edit a derivation's JSON (env/builder/args) and rebuild just that
+    /// node. `output` disambiguates which output to edit when `path` is a
+    /// bare `.drv` with more than one (ignored otherwise, since a plain
+    /// output path is already unambiguous) — pass `.` to infer it, which
+    /// only works if there's exactly one. May be repeated; may be combined
+    /// with --replace/--edit/--edit-nix.
+    #[arg(long = "edit-drv", num_args = 2, value_names = ["path", "output"])]
+    edit_drv: Vec<String>,
+    /// Edit the .nix file backing a file-based installable
+    /// (`path/to/file.nix[#attr]`) and rebuild just that attribute. May be
+    /// repeated; may be combined with --replace/--edit/--edit-drv.
+    #[arg(long = "edit-nix")]
+    edit_nix: Vec<String>,
+}
+
 #[derive(Subcommand)]
 enum Cmd {
-    /// Replace all of `old` with `new`, in the context of the closure rooted at <closure-root>.
+    /// Replace, edit, or rebuild one or more things, grafting every result
+    /// up through the closure rooted at <closure-root> in a single pass.
     Replace {
         /// A store path, flake reference, `.drv` path, or `file.nix[#attr]`
         /// installable — built automatically if not already realized.
         closure_root: String,
-        /// old=new installable pair; may be repeated. Same installable
-        /// forms as `closure-root`.
-        #[arg(long = "replace", value_parser = parse_pair, required = true)]
-        replacements: Vec<(String, String)>,
+        #[command(flatten)]
+        transforms: TransformArgs,
         #[command(flatten)]
         strategy: StrategyArgs,
         /// Extra flags forwarded to the underlying `nix build` calls that
-        /// actually realise each graft/rebuild, e.g. `-- -Lv --builders ssh://...`.
+        /// actually realise each graft/rebuild, e.g. `-- --eval-store <url>`.
         #[arg(last = true)]
         nix_args: Vec<String>,
-    },
-    /// Edit a value inside the closure and graft the result up through it.
-    Edit {
-        #[command(subcommand)]
-        target: EditCmd,
     },
     /// `replace`, defaulted to a NixOS system profile instead of a
     /// closure-root you have to already know the path of.
@@ -228,10 +255,8 @@ enum Cmd {
         /// a mounted image's system closure.
         #[arg(long, default_value = "/nix/var/nix/profiles/system")]
         profile: String,
-        /// old=new installable pair; may be repeated. Same installable
-        /// forms as `replace`'s.
-        #[arg(long = "replace", value_parser = parse_pair, required = true)]
-        replacements: Vec<(String, String)>,
+        #[command(flatten)]
+        transforms: TransformArgs,
         #[command(flatten)]
         strategy: StrategyArgs,
         /// Register the graft's result as a new generation of --profile and
@@ -245,99 +270,61 @@ enum Cmd {
     },
 }
 
-#[derive(Subcommand)]
-enum EditCmd {
-    /// Edit a file inside an already-built store path.
-    File {
-        closure_root: String,
-        path: String,
-        /// Path within the store item to open; defaults to the whole tree.
-        subpath: Option<PathBuf>,
-        #[command(flatten)]
-        strategy: StrategyArgs,
-        /// Extra flags forwarded to the `nix build` calls made while
-        /// grafting the edit up through the closure.
-        #[arg(last = true)]
-        nix_args: Vec<String>,
-    },
-    /// Edit a derivation's JSON (env/builder/args) and rebuild just that node.
-    Drv {
-        closure_root: String,
-        /// A `.drv` path, a plain store output path (its deriver is looked
-        /// up automatically), or any other installable.
-        path: String,
-        /// Which output to edit, by name (e.g. `dev`, `man`) — only needed
-        /// when `path` is a bare `.drv` with more than one output; if `path`
-        /// is already a specific output path, the output is unambiguous.
-        #[arg(long)]
-        output: Option<String>,
-        #[command(flatten)]
-        strategy: StrategyArgs,
-        /// Extra flags forwarded to the `nix build` calls for the edited
-        /// node itself and every graft built on top of it.
-        #[arg(last = true)]
-        nix_args: Vec<String>,
-    },
-    /// Edit the .nix file backing an installable and rebuild just that attribute.
-    Nix {
-        closure_root: String,
-        installable: String,
-        #[command(flatten)]
-        strategy: StrategyArgs,
-        /// Extra flags forwarded to the `nix build` call for the edited
-        /// attribute and every graft built on top of it.
-        #[arg(last = true)]
-        nix_args: Vec<String>,
-    },
-}
-
-fn parse_pair(s: &str) -> Result<(String, String), String> {
-    let (old, new) = s
-        .split_once('=')
-        .ok_or_else(|| format!("expected old=new, got `{s}`"))?;
-    Ok((old.to_string(), new.to_string()))
+/// Resolves every transform flag in `transforms` into `(old, new)` pairs
+/// and gathers them into one list — see [`TransformArgs`]'s doc comment
+/// for why this is the one place all four converge. `--edit`'s closure
+/// membership check is computed at most once, not once per `--edit`, since
+/// several may be combined in one invocation.
+fn collect_pairs(closure_root: &Path, nix_args: &[String], transforms: TransformArgs) -> Result<Vec<(PathBuf, PathBuf)>> {
+    let TransformArgs { replace, edit, edit_drv, edit_nix } = transforms;
+    let mut pairs = Vec::new();
+    for pair in replace.chunks(2) {
+        pairs.push((installable::resolve(&pair[0], nix_args)?, installable::resolve(&pair[1], nix_args)?));
+    }
+    if !edit.is_empty() {
+        let closure = store::closure(closure_root)?;
+        for pair in edit.chunks(2) {
+            let path = installable::resolve(&pair[0], nix_args)?;
+            let subpath = if pair[1] == "." { None } else { Some(PathBuf::from(&pair[1])) };
+            pairs.push(edit_file::produce_pair(closure_root, &closure, &path, subpath.as_deref())?);
+        }
+    }
+    for pair in edit_drv.chunks(2) {
+        let path = installable::resolve(&pair[0], nix_args)?;
+        let output = if pair[1] == "." { None } else { Some(pair[1].as_str()) };
+        pairs.push(edit_drv::produce_pair(&path, output, nix_args)?);
+    }
+    for installable_str in &edit_nix {
+        pairs.push(edit_nix::produce_pair(installable_str, nix_args)?);
+    }
+    if pairs.is_empty() {
+        bail!("at least one of --replace, --edit, --edit-drv, or --edit-nix is required");
+    }
+    Ok(pairs)
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
     log::set_verbose(cli.verbose);
     let (result, out_link, nix_args) = match cli.command {
-        Cmd::Replace { closure_root, replacements, strategy, nix_args } => {
+        Cmd::Replace { closure_root, transforms, strategy, nix_args } => {
             let nix_args = strategy.merged_nix_args(nix_args);
             let closure_root = installable::resolve(&closure_root, &nix_args)?;
-            let replacements: Vec<(PathBuf, PathBuf)> = replacements
-                .iter()
-                .map(|(old, new)| Ok((installable::resolve(old, &nix_args)?, installable::resolve(new, &nix_args)?)))
-                .collect::<Result<_>>()?;
+            let pairs = collect_pairs(&closure_root, &nix_args, transforms)?;
             let out_link = out_link_unless_dry_run(&strategy);
-            (replace::replace(&closure_root, &replacements, &strategy.opts(&nix_args))?, out_link, nix_args)
+            (replace::replace(&closure_root, &pairs, &strategy.opts(&nix_args))?, out_link, nix_args)
         }
-        Cmd::Edit { target } => match target {
-            EditCmd::File { closure_root, path, subpath, strategy, nix_args } => {
-                let nix_args = strategy.merged_nix_args(nix_args);
-                let closure_root = installable::resolve(&closure_root, &nix_args)?;
-                let path = installable::resolve(&path, &nix_args)?;
-                let out_link = out_link_unless_dry_run(&strategy);
-                (edit_file::run(&closure_root, &path, subpath.as_deref(), &strategy.opts(&nix_args))?, out_link, nix_args)
-            }
-            EditCmd::Drv { closure_root, path, output, strategy, nix_args } => {
-                let nix_args = strategy.merged_nix_args(nix_args);
-                let closure_root = installable::resolve(&closure_root, &nix_args)?;
-                let path = installable::resolve(&path, &nix_args)?;
-                let out_link = out_link_unless_dry_run(&strategy);
-                (edit_drv::run(&closure_root, &path, output.as_deref(), &strategy.opts(&nix_args))?, out_link, nix_args)
-            }
-            EditCmd::Nix { closure_root, installable, strategy, nix_args } => {
-                let nix_args = strategy.merged_nix_args(nix_args);
-                let closure_root = crate::installable::resolve(&closure_root, &nix_args)?;
-                let out_link = out_link_unless_dry_run(&strategy);
-                (edit_nix::run(&closure_root, &installable, &strategy.opts(&nix_args))?, out_link, nix_args)
-            }
-        },
-        Cmd::NixosSystem { profile, replacements, strategy, switch, nix_args } => {
+        Cmd::NixosSystem { profile, transforms, strategy, switch, nix_args } => {
             let nix_args = strategy.merged_nix_args(nix_args);
+            let closure_root = installable::resolve(&profile, &nix_args).with_context(|| {
+                format!(
+                    "failed to resolve `{profile}` — is this a NixOS system? Pass --profile <path> to \
+                     target a different one (a specific generation, or a mounted image's system closure)"
+                )
+            })?;
+            let pairs = collect_pairs(&closure_root, &nix_args, transforms)?;
             let out_link = out_link_unless_dry_run(&strategy);
-            (nixos_system::run(&profile, &replacements, &strategy.opts(&nix_args), switch)?, out_link, nix_args)
+            (nixos_system::run(&profile, &closure_root, &pairs, &strategy.opts(&nix_args), switch)?, out_link, nix_args)
         }
     };
     if let Some(link) = out_link {

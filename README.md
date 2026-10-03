@@ -34,7 +34,7 @@ nix develop -c cargo test
 Replace a dependency throughout a closure:
 
 ```
-graft replace <closure-root> --replace <old>=<new>
+graft replace <closure-root> --replace <old> <new>
 ```
 
 This grafts every affected path bottom-up (a blind but fast NAR
@@ -59,7 +59,7 @@ automatically if it isn't already. No need to `nix build` both sides
 yourself first:
 
 ```
-graft replace .#myImage --replace nixpkgs#openssl=nixpkgs#openssl_3_2
+graft replace .#myImage --replace nixpkgs#openssl nixpkgs#openssl_3_2
 ```
 
 Useful flags (all repeatable where noted):
@@ -101,23 +101,29 @@ Useful flags (all repeatable where noted):
 
 `graft --version` reports the installed version.
 
-Instead of supplying a pre-built `old=new` pair yourself, three subcommands
-let you make a small edit and have `graft` derive it for you, then graft the
-result up through the closure the same way:
+Instead of supplying a pre-built `old`/`new` pair yourself, three more
+flags let you make a small edit and have `graft` derive the pair for you —
+and all four, including `--replace`, may be repeated and freely combined
+in a single invocation, grafting every result up through the closure
+together in one pass:
 
 ```
-graft edit file <closure-root> <path> [<subpath>]   # edit a file in a built output
-graft edit drv  <closure-root> <path>                # edit a derivation's JSON and rebuild it
-graft edit nix  <closure-root> <file.nix>[#attr]     # edit the .nix source and rebuild it
+graft replace <closure-root> --edit <path> <subpath>  # edit a file in a built output (`.` for the whole tree)
+graft replace <closure-root> --edit-drv <path> <output>  # edit a derivation's JSON and rebuild it (`.` to infer the output)
+graft replace <closure-root> --edit-nix <file.nix>[#attr]  # edit the .nix source and rebuild it
 ```
 
-All four commands (`replace` and the three `edit` variants) accept the same
-strategy flags above; run `graft <command> --help` for the full list.
+e.g. `graft replace /run/current-system --replace nixpkgs#openssl nixpkgs#openssl_3_2 --edit "$(readlink -f /etc/foo.conf)" .`
+replaces openssl *and* hand-edits a config file in the same closure walk
+(`--edit`'s `path` needs the real store path, not an `/etc` symlink to
+it — `readlink -f` resolves that, the same way you'd find it to inspect
+it manually). Run `graft replace --help` for the full flag list.
 
-Patch the currently running NixOS system without looking up its path first:
+Patch the currently running NixOS system without looking up its path first
+(same transform flags as `replace`):
 
 ```
-graft nixos-system --replace nixpkgs#openssl=nixpkgs#openssl_3_2
+graft nixos-system --replace nixpkgs#openssl nixpkgs#openssl_3_2
 ```
 
 Defaults to `/nix/var/nix/profiles/system` (override with `--profile`); add

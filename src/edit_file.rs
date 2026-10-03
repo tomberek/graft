@@ -1,28 +1,18 @@
-use crate::replace::{ReplaceOptions, ReplaceResult};
-use crate::{editor, log, replace, store};
+use crate::{editor, log, store};
 use anyhow::{bail, Context, Result};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-/// Dump `path` (which must be in `closure_root`'s closure), open `$EDITOR` on
-/// `subpath` inside it (or the whole extracted tree if omitted), re-add the
-/// edited tree as a fresh content-addressed store path, and graft it up
-/// through `closure_root`.
-pub fn run(
-    closure_root: &Path,
-    path: &Path,
-    subpath: Option<&Path>,
-    opts: &ReplaceOptions,
-) -> Result<ReplaceResult> {
-    store::require_output_path(closure_root)?;
+/// Dump `path` (which must be in `closure`), open `$EDITOR` on `subpath`
+/// inside it (or the whole extracted tree if omitted), re-add the edited
+/// tree as a fresh content-addressed store path, and return the
+/// `(old, new)` pair. Grafting it up through the closure is the caller's
+/// job (`main.rs`'s `collect_pairs`) — several of these, and/or
+/// `--replace`/`--edit-drv`/`--edit-nix`, can be combined into one closure
+/// walk, so producing the pair is kept separate from applying it.
+pub fn produce_pair(closure_root: &Path, closure: &[PathBuf], path: &Path, subpath: Option<&Path>) -> Result<(PathBuf, PathBuf)> {
     store::require_output_path(path)?;
-    store::canonicalize(closure_root)?;
-    let closure = store::closure(closure_root)?;
     if !closure.iter().any(|p| p == path) {
-        bail!(
-            "{} is not in the closure of {}",
-            path.display(),
-            closure_root.display()
-        );
+        bail!("{} is not in the closure of {}", path.display(), closure_root.display());
     }
 
     let name = store::store_name(path)?;
@@ -50,5 +40,5 @@ pub fn run(
     log::v(format!("re-adding {} to the store", extracted.display()));
     let new_path = store::add_fixed_recursive(&extracted)?;
     log::v(format!("edited path: {} -> {}", path.display(), new_path.display()));
-    replace::replace(closure_root, &[(path.to_path_buf(), new_path)], opts)
+    Ok((path.to_path_buf(), new_path))
 }

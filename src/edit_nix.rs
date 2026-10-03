@@ -1,28 +1,27 @@
-use crate::replace::{ReplaceOptions, ReplaceResult};
-use crate::{derivation, editor, log, replace, store};
+use crate::{derivation, editor, log};
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Best-effort: record `installable`'s current output, open `$EDITOR` on the
-/// `.nix` file backing it, rebuild just that attribute, and graft the result
-/// up through `closure_root`. Only supports file-based installables
-/// (`path/to/file.nix` or `path/to/file.nix#attr`, in the `-f`/`nix-build`
-/// sense) and does not attempt to seek the editor to `attr`'s exact location.
-pub fn run(closure_root: &Path, installable: &str, opts: &ReplaceOptions) -> Result<ReplaceResult> {
-    store::require_output_path(closure_root)?;
-    store::canonicalize(closure_root)?;
+/// Best-effort: record `installable`'s current output, open `$EDITOR` on
+/// the `.nix` file backing it, rebuild just that attribute, and return the
+/// `(old, new)` pair — grafting it up through the closure is the caller's
+/// job (see `edit_file::produce_pair`'s doc comment). Only supports
+/// file-based installables (`path/to/file.nix` or `path/to/file.nix#attr`,
+/// in the `-f`/`nix-build` sense) and does not attempt to seek the editor
+/// to `attr`'s exact location.
+pub fn produce_pair(installable: &str, nix_args: &[String]) -> Result<(PathBuf, PathBuf)> {
     let (file, attr) = parse_installable(installable);
     if !file.exists() {
-        bail!("`graft edit nix` only supports file-based installables; could not find `{}` on disk", file.display());
+        bail!("`--edit-nix` only supports file-based installables; could not find `{}` on disk", file.display());
     }
     let old = current_output(&file, attr.as_deref())?;
     log::v(format!("current output of {}: {}", installable, old.display()));
     log::v(format!("opening $EDITOR on {}", file.display()));
     editor::edit(&file)?;
-    let new = build(&file, attr.as_deref(), opts.nix_args)?;
+    let new = build(&file, attr.as_deref(), nix_args)?;
     log::v(format!("rebuilt attribute: {} -> {}", old.display(), new.display()));
-    replace::replace(closure_root, &[(old, new)], opts)
+    Ok((old, new))
 }
 
 /// `file.nix#attr` -> (`file.nix`, Some(`attr`)); `file.nix` -> (`file.nix`, None).
