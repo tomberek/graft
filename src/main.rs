@@ -31,6 +31,95 @@ struct Cli {
     command: Cmd,
 }
 
+/// The common `nix build`/`nix eval` flags, under their real `nix` names
+/// and shorts, available directly on every subcommand instead of needing
+/// `-- <nix args>` for the ones most people actually reach for. Rendered
+/// back into the equivalent `nix` CLI tokens and merged ahead of whatever
+/// `-- <nix args>` adds, so both work together.
+#[derive(Args)]
+struct NixPassthroughArgs {
+    /// Print full build logs on standard error.
+    #[arg(short = 'L', long)]
+    print_build_logs: bool,
+    /// Maximum number of build jobs Nix will run in parallel (`auto` for
+    /// the number of CPU cores).
+    #[arg(short = 'j', long)]
+    max_jobs: Option<String>,
+    /// Maximum number of CPU cores a single build job can use.
+    #[arg(long)]
+    cores: Option<String>,
+    /// Remote build machines to use, in `nix.conf`'s `builders` syntax.
+    #[arg(long)]
+    builders: Option<String>,
+    /// Set a Nix configuration setting for these calls, e.g. `--option
+    /// keep-going true` — the same two-value form `nix` itself uses, not
+    /// `name=value`. May be repeated.
+    #[arg(long = "option", num_args = 2, value_names = ["name", "value"])]
+    options: Vec<String>,
+    /// Allow access to mutable paths and repositories during evaluation.
+    #[arg(long)]
+    impure: bool,
+    /// Disable substituters and consider all previously downloaded files up-to-date.
+    #[arg(long)]
+    offline: bool,
+    /// Consider all previously downloaded files out-of-date.
+    #[arg(long)]
+    refresh: bool,
+    /// Keep going as far as possible after a build fails.
+    #[arg(short = 'k', long)]
+    keep_going: bool,
+    /// Fall back to building from source if a substitution fails.
+    #[arg(long)]
+    fallback: bool,
+    /// Print a stack trace when evaluation fails.
+    #[arg(long)]
+    show_trace: bool,
+}
+
+impl NixPassthroughArgs {
+    fn to_args(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if self.print_build_logs {
+            out.push("--print-build-logs".to_string());
+        }
+        if let Some(j) = &self.max_jobs {
+            out.push("--max-jobs".to_string());
+            out.push(j.clone());
+        }
+        if let Some(c) = &self.cores {
+            out.push("--cores".to_string());
+            out.push(c.clone());
+        }
+        if let Some(b) = &self.builders {
+            out.push("--builders".to_string());
+            out.push(b.clone());
+        }
+        for pair in self.options.chunks(2) {
+            out.push("--option".to_string());
+            out.extend(pair.iter().cloned());
+        }
+        if self.impure {
+            out.push("--impure".to_string());
+        }
+        if self.offline {
+            out.push("--offline".to_string());
+        }
+        if self.refresh {
+            out.push("--refresh".to_string());
+        }
+        if self.keep_going {
+            out.push("--keep-going".to_string());
+        }
+        if self.fallback {
+            out.push("--fallback".to_string());
+        }
+        if self.show_trace {
+            out.push("--show-trace".to_string());
+        }
+        out
+    }
+}
+
 /// Strategy knobs shared by `replace` and every `edit_*` subcommand,
 /// controlling propagation through the closure above whatever's replaced/edited.
 #[derive(Args)]
@@ -78,9 +167,20 @@ struct StrategyArgs {
     /// it's a separate flag rather than implied by `--report` alone.
     #[arg(long)]
     report_diff: bool,
+    #[command(flatten)]
+    nix_common: NixPassthroughArgs,
 }
 
 impl StrategyArgs {
+    /// `nix_common`'s flags, rendered to CLI tokens, ahead of whatever
+    /// trailing `-- <nix args>` the caller also supplied — the only two
+    /// sources `nix_args` ever has, merged once here.
+    fn merged_nix_args(&self, trailing: Vec<String>) -> Vec<String> {
+        let mut args = self.nix_common.to_args();
+        args.extend(trailing);
+        args
+    }
+
     fn opts<'a>(&'a self, nix_args: &'a [String]) -> ReplaceOptions<'a> {
         ReplaceOptions {
             dry_run: self.dry_run,
@@ -201,42 +301,47 @@ fn parse_pair(s: &str) -> Result<(String, String), String> {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     log::set_verbose(cli.verbose);
-    let (result, out_link) = match cli.command {
+    let (result, out_link, nix_args) = match cli.command {
         Cmd::Replace { closure_root, replacements, strategy, nix_args } => {
+            let nix_args = strategy.merged_nix_args(nix_args);
             let closure_root = installable::resolve(&closure_root, &nix_args)?;
             let replacements: Vec<(PathBuf, PathBuf)> = replacements
                 .iter()
                 .map(|(old, new)| Ok((installable::resolve(old, &nix_args)?, installable::resolve(new, &nix_args)?)))
                 .collect::<Result<_>>()?;
             let out_link = out_link_unless_dry_run(&strategy);
-            (replace::replace(&closure_root, &replacements, &strategy.opts(&nix_args))?, out_link)
+            (replace::replace(&closure_root, &replacements, &strategy.opts(&nix_args))?, out_link, nix_args)
         }
         Cmd::Edit { target } => match target {
             EditCmd::File { closure_root, path, subpath, strategy, nix_args } => {
+                let nix_args = strategy.merged_nix_args(nix_args);
                 let closure_root = installable::resolve(&closure_root, &nix_args)?;
                 let path = installable::resolve(&path, &nix_args)?;
                 let out_link = out_link_unless_dry_run(&strategy);
-                (edit_file::run(&closure_root, &path, subpath.as_deref(), &strategy.opts(&nix_args))?, out_link)
+                (edit_file::run(&closure_root, &path, subpath.as_deref(), &strategy.opts(&nix_args))?, out_link, nix_args)
             }
             EditCmd::Drv { closure_root, path, output, strategy, nix_args } => {
+                let nix_args = strategy.merged_nix_args(nix_args);
                 let closure_root = installable::resolve(&closure_root, &nix_args)?;
                 let path = installable::resolve(&path, &nix_args)?;
                 let out_link = out_link_unless_dry_run(&strategy);
-                (edit_drv::run(&closure_root, &path, output.as_deref(), &strategy.opts(&nix_args))?, out_link)
+                (edit_drv::run(&closure_root, &path, output.as_deref(), &strategy.opts(&nix_args))?, out_link, nix_args)
             }
             EditCmd::Nix { closure_root, installable, strategy, nix_args } => {
+                let nix_args = strategy.merged_nix_args(nix_args);
                 let closure_root = crate::installable::resolve(&closure_root, &nix_args)?;
                 let out_link = out_link_unless_dry_run(&strategy);
-                (edit_nix::run(&closure_root, &installable, &strategy.opts(&nix_args))?, out_link)
+                (edit_nix::run(&closure_root, &installable, &strategy.opts(&nix_args))?, out_link, nix_args)
             }
         },
         Cmd::NixosSystem { profile, replacements, strategy, switch, nix_args } => {
+            let nix_args = strategy.merged_nix_args(nix_args);
             let out_link = out_link_unless_dry_run(&strategy);
-            (nixos_system::run(&profile, &replacements, &strategy.opts(&nix_args), switch)?, out_link)
+            (nixos_system::run(&profile, &replacements, &strategy.opts(&nix_args), switch)?, out_link, nix_args)
         }
     };
     if let Some(link) = out_link {
-        derivation::add_out_link(&result.new_root, &link)?;
+        derivation::add_out_link(&result.new_root, &link, &nix_args)?;
         provenance::record(&link, &result.new_root)?;
     }
     println!("{}", result.new_root.display());

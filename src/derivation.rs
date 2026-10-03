@@ -477,10 +477,11 @@ pub fn build_many(targets: &[(PathBuf, String)], nix_args: &[String]) -> Result<
 /// just a plain symlink, and the same mechanism `nix build -o` itself uses.
 /// Every build this tool does otherwise passes `--no-link`, so without this
 /// nothing produced here is protected from a concurrent garbage collection.
-pub fn add_out_link(target: &Path, link: &Path) -> Result<()> {
+pub fn add_out_link(target: &Path, link: &Path, nix_args: &[String]) -> Result<()> {
     log::v(format!("running: nix build {} --out-link {}", target.display(), link.display()));
     let status = Command::new("nix")
         .args(["build", &target.display().to_string(), "--out-link", &link.display().to_string()])
+        .args(nix_args)
         .status()
         .with_context(|| format!("failed to spawn nix build {} --out-link {}", target.display(), link.display()))?;
     if !status.success() {

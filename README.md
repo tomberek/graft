@@ -91,8 +91,13 @@ Useful flags (all repeatable where noted):
   grafting never changes the derivation) and link each node's `diffoscope`
   artifact diff. Needs `nix-diff`/`diffoscope` on `PATH` (in this project's
   own `nix develop` shell already).
-- `-- <nix args>` — anything after a literal `--` is forwarded to the
-  underlying `nix build` calls (e.g. `-- -Lv --builders ''`).
+- The common `nix build`/`nix eval` flags are available directly, under
+  their real `nix` names and shorts, forwarded to every underlying `nix
+  build` call: `-L`/`--print-build-logs`, `-j`/`--max-jobs`, `--cores`,
+  `--builders`, `--option <name> <value>`, `--impure`, `--offline`,
+  `--refresh`, `-k`/`--keep-going`, `--fallback`, `--show-trace`.
+- `-- <nix args>` — anything after a literal `--` is forwarded too, for
+  anything not covered above (e.g. `-- --eval-store <url>`).
 
 `graft --version` reports the installed version.
 

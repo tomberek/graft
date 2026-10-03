@@ -848,11 +848,15 @@ grafts into the same out-link, not just the most recent one.
 dependency graph plus a details table, self-contained (no CDN, no build
 step, no JS framework — just hand-written SVG and a `<style>` block).
 
-The graph's layout isn't a new layout algorithm — it's `classify`'s
-scheduling `level` (§10), reused directly for vertical position. That's not
-a coincidence worth glossing over: "which nodes could build at the same
-time" and "which nodes make sense to draw on the same row of a dependency
-diagram" are the same question, so the same data answers both. Only
+Each node's row is computed fresh from the same `depends_on` edges the
+graph already draws (`1 +` the deepest row among its own included direct
+references) — deliberately *not* `classify`'s scheduling `level` (§10).
+The two look like the same question ("which nodes could build at the same
+time" vs. "which nodes belong on the same row") but aren't: that level is
+always `0` for `Explicit`/`Cutoff` nodes, since neither needs a build to
+wait for, which put every one of them on the graph's bottom row regardless
+of how deep they actually sat in the reference graph — a cutoff partway up
+a chain rendered *below* the dependency it left untouched. Only
 `Unchanged` is excluded — a real closure's unchanged majority is genuine
 noise for a report meant to answer "what did this graft do," not a graph
 of the whole closure. `Cutoff` is deliberately *kept*, even though it's
@@ -927,3 +931,34 @@ wrapped `PATH`), and tests run against the real tools rather than stubs,
 matching this project's existing testing philosophy: every other test here
 drives real `nix build`/`nix-store`, not fakes, and `nix-diff`/`diffoscope`
 are no more special-cased than those.
+
+## 13. Feeling like `nix` itself: common flags promoted out of `-- <nix args>`
+
+Every build this tool does already forwards a trailing `-- <nix args>`
+verbatim to the underlying `nix build` call, so nothing here was ever
+*impossible* — `graft replace foo --replace a=b -- -L --max-jobs 4` always
+worked. But it meant knowing in advance which flags were "ours" (before
+`--`) versus "nix's" (after it), which is exactly the kind of thing someone
+coming from `nix build` shouldn't have to think about for the handful of
+flags they reach for constantly.
+
+`NixPassthroughArgs` (`main.rs`) lists the common ones under their real
+`nix` names and shorts — `-L`/`--print-build-logs`, `-j`/`--max-jobs`,
+`--cores`, `--builders`, `--option <name> <value>`, `--impure`, `--offline`,
+`--refresh`, `-k`/`--keep-going`, `--fallback`, `--show-trace` — flattened
+into `StrategyArgs` so every subcommand gets them automatically, same as
+`--cutoff`/`--out-link`/etc. already are. `--option` takes two separate
+values (`--option keep-going true`), matching nix's own two-value form
+exactly rather than this project's usual `name=value` convention (used for
+`--replace`/`--force-rebuild`) — consistency with `nix` wins here, since
+the whole point is forwarding exactly what `nix` itself expects.
+
+`StrategyArgs::merged_nix_args` renders these back into their equivalent
+CLI tokens and prepends them to whatever trailing `-- <nix args>` the
+caller also supplied, so both work together: the promoted flags cover the
+common case, and `--` remains the escape hatch for anything more obscure
+(`--eval-store`, `--override-flake`, etc.) without this tool needing to
+know about every flag `nix` has. The merged result is used everywhere
+`nix_args` already flowed — installable resolution, the actual
+graft/rebuild builds, and `--out-link`'s own `nix build --out-link` call,
+which previously took no `nix_args` at all.
