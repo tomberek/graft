@@ -225,7 +225,7 @@ struct TransformArgs {
     /// Edit the .nix file backing a file-based installable
     /// (`path/to/file.nix[#attr]`) and rebuild just that attribute. May be
     /// repeated; may be combined with --replace/--edit/--edit-drv.
-    #[arg(long = "edit-nix")]
+    #[arg(long = "edit-nix", value_name = "file.nix[#attr]")]
     edit_nix: Vec<String>,
 }
 
