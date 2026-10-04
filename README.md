@@ -32,7 +32,7 @@ nix develop -c cargo test
 ## The basic idea
 
 ```
-graft replace <closure-root> --replace <old> <new>
+graft replace <closure-root> --override <old> <new>
 ```
 
 Walks the closure rooted at `<closure-root>` bottom-up and, for every path
@@ -49,19 +49,19 @@ grafted /nix/store/7c1d...-curl-8.9.0 -> /nix/store/a84f...-curl-8.9.0
 /nix/store/a84f...-curl-8.9.0
 ```
 
-`<closure-root>` and both sides of `--replace` are installables, not just
+`<closure-root>` and both sides of `--override` are installables, not just
 store paths — a flake reference, a `.drv` path, a `file.nix`/`file.nix#attr`
 expression, or a plain store path, built automatically if it isn't already:
 
 ```
-graft replace .#myImage --replace nixpkgs#openssl nixpkgs#openssl_3_2
+graft replace .#myImage --override nixpkgs#openssl nixpkgs#openssl_3_2
 ```
 
 ## Editing instead of replacing
 
 Three more flags let you make a small edit and have `graft` derive the
 `old`/`new` pair for you, rather than supplying a pre-built one. All four
-— including `--replace` — may be repeated and freely combined in a single
+— including `--override` — may be repeated and freely combined in a single
 invocation, grafting every result up through the closure together in one
 pass.
 
@@ -112,7 +112,7 @@ two out-links to reconcile yourself:
 
 ```
 graft replace /run/current-system \
-  --replace nixpkgs#openssl nixpkgs#openssl_3_2 \
+  --override nixpkgs#openssl nixpkgs#openssl_3_2 \
   --edit "$(readlink -f /etc/foo.conf)" .
 ```
 
@@ -174,7 +174,7 @@ Patch the currently running NixOS system without looking up its path
 first — same transform/strategy/output flags as `replace`:
 
 ```
-graft nixos-system --replace nixpkgs#openssl nixpkgs#openssl_3_2
+graft nixos-system --override nixpkgs#openssl nixpkgs#openssl_3_2
 ```
 
 Defaults to `/nix/var/nix/profiles/system` (override with `--profile`); add
@@ -188,7 +188,7 @@ commands you'd run to apply it yourself.
 Preview what a graft would do, without touching the store:
 
 ```
-graft replace .#myImage --replace nixpkgs#openssl nixpkgs#openssl_3_2 --dry-run
+graft replace .#myImage --override nixpkgs#openssl nixpkgs#openssl_3_2 --dry-run
 ```
 
 Do a real rebuild instead of a byte-level graft, protect the result from
@@ -196,7 +196,7 @@ GC, and write an HTML report of what happened:
 
 ```
 graft replace .#myImage \
-  --replace nixpkgs#openssl nixpkgs#openssl_3_2 \
+  --override nixpkgs#openssl nixpkgs#openssl_3_2 \
   --rebuild --out-link ./result --report ./report
 ```
 
@@ -205,8 +205,8 @@ use the rebuild strategy regardless of the (default-graft) global mode:
 
 ```
 graft replace .#myImage \
-  --replace nixpkgs#openssl nixpkgs#openssl_3_2 \
-  --replace nixpkgs#curl nixpkgs#curl_8_9 \
+  --override nixpkgs#openssl nixpkgs#openssl_3_2 \
+  --override nixpkgs#curl nixpkgs#curl_8_9 \
   --force-rebuild /nix/store/...-curl-8.9.0
 ```
 
@@ -214,7 +214,7 @@ Never touch a NixOS closure's embedded store database while grafting
 everything else above a changed package:
 
 ```
-graft nixos-system --replace nixpkgs#openssl nixpkgs#openssl_3_2 \
+graft nixos-system --override nixpkgs#openssl nixpkgs#openssl_3_2 \
   --cutoff /nix/store/...-nixos-system-registration
 ```
 
@@ -222,7 +222,7 @@ Walk through every affected path interactively, picking a strategy per
 node like `git rebase -i`:
 
 ```
-graft replace .#myImage --replace nixpkgs#openssl nixpkgs#openssl_3_2 --interactive
+graft replace .#myImage --override nixpkgs#openssl nixpkgs#openssl_3_2 --interactive
 ```
 
 Build with full logs streamed live and a pinned job count, forwarding
@@ -230,7 +230,7 @@ straight into the underlying `nix build` the same way you'd call `nix
 build` itself:
 
 ```
-graft replace .#myImage --replace nixpkgs#openssl nixpkgs#openssl_3_2 -L -j4
+graft replace .#myImage --override nixpkgs#openssl nixpkgs#openssl_3_2 -L -j4
 ```
 
 ## Status

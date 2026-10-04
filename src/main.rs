@@ -203,15 +203,16 @@ impl StrategyArgs {
 /// both end up calling [`collect_pairs`] with these same four fields.
 #[derive(Args)]
 struct TransformArgs {
-    /// Replace `old` with `new` throughout the closure. `old`/`new` are
-    /// installables, same forms as `closure-root`. May be repeated; may be
-    /// combined with --edit/--edit-drv/--edit-nix.
-    #[arg(long = "replace", num_args = 2, value_names = ["old", "new"])]
-    replace: Vec<String>,
+    /// Override `old` with `new` throughout the closure — the same name
+    /// `nix`'s own `--override-input` uses for "swap this specific thing".
+    /// `old`/`new` are installables, same forms as `closure-root`. May be
+    /// repeated; may be combined with --edit/--edit-drv/--edit-nix.
+    #[arg(long = "override", num_args = 2, value_names = ["old", "new"])]
+    overrides: Vec<String>,
     /// Edit a file inside an already-built store path and graft the
     /// result up through the closure. `subpath` is relative to `path`'s
     /// own root; pass `.` for the whole tree. May be repeated; may be
-    /// combined with --replace/--edit-drv/--edit-nix.
+    /// combined with --override/--edit-drv/--edit-nix.
     #[arg(long = "edit", num_args = 2, value_names = ["path", "subpath"])]
     edit: Vec<String>,
     /// Edit a derivation's JSON (env/builder/args) and rebuild just that
@@ -219,12 +220,12 @@ struct TransformArgs {
     /// bare `.drv` with more than one (ignored otherwise, since a plain
     /// output path is already unambiguous) — pass `.` to infer it, which
     /// only works if there's exactly one. May be repeated; may be combined
-    /// with --replace/--edit/--edit-nix.
+    /// with --override/--edit/--edit-nix.
     #[arg(long = "edit-drv", num_args = 2, value_names = ["path", "output"])]
     edit_drv: Vec<String>,
     /// Edit the .nix file backing a file-based installable
     /// (`path/to/file.nix[#attr]`) and rebuild just that attribute. May be
-    /// repeated; may be combined with --replace/--edit/--edit-drv.
+    /// repeated; may be combined with --override/--edit/--edit-drv.
     #[arg(long = "edit-nix", value_name = "file.nix[#attr]")]
     edit_nix: Vec<String>,
 }
@@ -276,9 +277,9 @@ enum Cmd {
 /// membership check is computed at most once, not once per `--edit`, since
 /// several may be combined in one invocation.
 fn collect_pairs(closure_root: &Path, nix_args: &[String], transforms: TransformArgs) -> Result<Vec<(PathBuf, PathBuf)>> {
-    let TransformArgs { replace, edit, edit_drv, edit_nix } = transforms;
+    let TransformArgs { overrides, edit, edit_drv, edit_nix } = transforms;
     let mut pairs = Vec::new();
-    for pair in replace.chunks(2) {
+    for pair in overrides.chunks(2) {
         pairs.push((installable::resolve(&pair[0], nix_args)?, installable::resolve(&pair[1], nix_args)?));
     }
     if !edit.is_empty() {
@@ -298,7 +299,7 @@ fn collect_pairs(closure_root: &Path, nix_args: &[String], transforms: Transform
         pairs.push(edit_nix::produce_pair(installable_str, nix_args)?);
     }
     if pairs.is_empty() {
-        bail!("at least one of --replace, --edit, --edit-drv, or --edit-nix is required");
+        bail!("at least one of --override, --edit, --edit-drv, or --edit-nix is required");
     }
     Ok(pairs)
 }

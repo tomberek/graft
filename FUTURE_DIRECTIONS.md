@@ -113,12 +113,12 @@ close to unchanged.
 
 ## Replacing by package name instead of exact store path
 
-**Status: designed, not started.** §8 of DESIGN.md let `--replace` accept
+**Status: designed, not started.** §8 of DESIGN.md let `--override` accept
 installables instead of requiring a pre-built store path, but that still
 requires knowing *which* installable produces the exact thing already in
 the target closure. Guix users never see a hash at all — grafting is driven
 by a `replacement` field on a package. The natural next ergonomic step is
-letting `--replace` accept a bare package name and have graft find the
+letting `--override` accept a bare package name and have graft find the
 right store path inside the closure itself.
 
 ### Why naive "match by name, replace every match" is unsafe
@@ -163,11 +163,11 @@ scope to exactly that:
   with its full store path and enough context to tell them apart (at least
   one direct consumer, so "which occurrence is this" has an answer). Zero
   risk, since it only prints information.
-- **`--replace-name <name>=<new>`** — sugar over `--replace`, not a
+- **`--override-name <name> <new>`** — sugar over `--override`, not a
   different mechanism. Resolves `name` against the closure; succeeds only
   if exactly one distinct match exists. If there's more than one, it refuses
   and prints the same candidate list `graft find` would, pointing the user
-  at an exact `--replace <old>=<new>` instead of guessing.
+  at an exact `--override <old> <new>` instead of guessing.
 - Matching should extract `pname` properly (strip the version suffix)
   rather than doing a raw substring match on the full `name-version`
   string — a substring match would both false-positive (`openssl` matching

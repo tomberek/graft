@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 /// itself accepts (a flake reference, a `.drv` path) or a legacy
 /// expression-file installable (`file.nix` or `file.nix#attr`, in the
 /// `-f`/`nix-build` sense), building it if it isn't already. Lets every
-/// path-taking argument on the CLI (`closure-root`, `--replace old=new`,
+/// path-taking argument on the CLI (`closure-root`, `--override old=new`,
 /// `edit drv`'s/`edit file`'s `path`) skip the "pre-build it yourself and
 /// paste the hash" step.
 pub fn resolve(s: &str, nix_args: &[String]) -> Result<PathBuf> {
