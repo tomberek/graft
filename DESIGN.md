@@ -94,7 +94,7 @@ like a live system profile — without triggering IFD.
 ### Core command: `replace`
 
 ```
-graft replace <closure-root> --replace <old> <new> [--replace <old> <new> ...] [--dry-run] [-- <extra nix build args>]
+graft replace <closure-root> --override <old> <new> [--override <old> <new> ...] [--dry-run] [-- <extra nix build args>]
 ```
 
 Anything after a literal `--` is forwarded verbatim to every `nix build`
@@ -127,7 +127,7 @@ behavior, there's no flag-passthrough concern to fix there anyway.
 "Replace all of `old` with `new`, in the context of the closure rooted at
 `closure-root`." Concretely:
 
-1. Reject any `--replace old new` pair up front if `basename(old)` and
+1. Reject any `--override old new` pair up front if `basename(old)` and
    `basename(new)` differ in length — same reasoning as Guix/nixpkgs: we're
    about to do a fixed-width byte substitution inside a NAR stream that other
    store items may embed as fixed-length strings.
@@ -191,6 +191,38 @@ through, so there's nothing the modern CLI buys it here), with `inputSrcs` =
 not} ∪ {the store items providing bash/sed/nix-store}`. Realise it (`nix
 build <drv>^out`, forwarding any `nix_args`) and that's the grafted path.
 
+**Self-references.** A path can embed its own basename somewhere in its
+content (confirmed via Nix's own `-q --references`: a path that does this
+genuinely references itself, and the daemon's post-build scan records it)
+— independent of whatever dependency actually triggered the graft. Naively,
+this can't be rewritten the same way as a real `(old, new)` pair: the new
+self-basename *is* this derivation's own output path, which Nix hasn't
+assigned yet while this script is still being constructed in Rust — using
+it here looks circular. It isn't, though, for an *ordinary* (non-fixed-
+output) derivation like this one: Nix computes the output path from the
+derivation's declared structure alone (builder, args, env, inputs), never
+from what the builder actually produces, and hands that already-decided
+value to the builder as `$out` *before* the builder runs. So the fix needs
+no coordination with the Rust side at all — a second `sed` pass, appended
+to the pipeline above, computed *inside the sandbox* after `$out` is
+known: `sed "s|<old-self-basename>|${out##*/}|g"` (bash's own basename via
+parameter expansion, not an external binary, so no extra sandboxed input
+to declare for it). A no-op when `path` has no self-reference, the common
+case. Verified by grafting a fixture that embeds `$out` in its own content
+independent of the dependency actually being replaced
+(`replace_rewrites_a_self_reference_to_the_grafted_result_s_own_path`):
+before this, the embedded text kept naming the *pre-graft* hash and the
+grafted output's own `references` ended up including that stale pre-graft
+path instead of itself (never garbage-collectable out from under it, and
+silently wrong if the self-reference was functionally load-bearing); after,
+both the dependency and the self-reference resolve correctly, and `-q
+--references` shows a genuine self-reference to the new path, not the old
+one. Not a bug unique to this tool while it existed — nixpkgs's own
+`replaceDirectDependencies` has the identical gap, for the identical reason
+(the new path isn't knowable from Rust/Nix-language code until the
+derivation exists) — just one neither tool needed to actually hit, since
+the fix only needed `$out`, already available for free inside the sandbox.
+
 One more real wrinkle surfaced by this: `nix derivation add` requires the
 `.drv`'s output path (and any `env` var that mirrors it) to already match
 Nix's own computed hash for that derivation — a hash with no public API
@@ -207,7 +239,7 @@ Reusing the original item's name-version suffix for a graft's scratch
 directory (and thus its resulting store item) means every graft this tool
 performs automatically satisfies the same-length constraint for *its own*
 basename when something further up the closure needs to reference it in
-turn — only the user-supplied top-level `--replace` pairs need the explicit
+turn — only the user-supplied top-level `--override` pairs need the explicit
 check in step 1.
 
 ### `--rebuild`: the other mode
@@ -288,7 +320,7 @@ the same walk, confirmed by inspecting both derivations' actual builder args,
 not just trusting the log output.
 
 Precedence when a path matches more than one control: an explicit
-`--replace <old> <new>` target wins over `--cutoff`, which wins over the
+`--override <old> <new>` target wins over `--cutoff`, which wins over the
 default strategy (`--rebuild` or plain grafting) — the same order nixpkgs
 documents for `cutoffPackages` vs. `replacements` in `replaceDependencies`.
 
@@ -308,7 +340,7 @@ Rather than requiring a pre-built replacement, three more flags let you
 make a small edit and have the tool derive `(old, new)` itself, then hand
 it to the exact same `replace` engine (walking the rewrite up through
 `C`) — originally three separate `edit <kind>` subcommands, unified with
-`--replace` into one combinable set of flags on `replace` itself; see §14
+`--override` into one combinable set of flags on `replace` itself; see §14
 for why and how. Each also takes a trailing `-- <extra nix args>`,
 forwarded to its own build step (`--edit-drv`'s and `--edit-nix`'s initial
 rebuild; `--edit` has none of its own) and to every graft built on top of
@@ -618,7 +650,7 @@ rebuild attempt actually does.
   file is parsed back, with the same explanation, rather than being accepted
   and failing later mid-walk.
 
-Same fix applied in both places: explicit `--replace` targets (the path(s)
+Same fix applied in both places: explicit `--override` targets (the path(s)
 named directly on the command line, as opposed to paths pulled in
 transitively by the closure walk) are no longer run through the
 graft-vs-rebuild feasibility machinery at all — they're always rewritten via
@@ -643,14 +675,14 @@ automatic.
 
 ## 8. Accepting installables, not just store paths
 
-Every earlier example required both sides of `--replace` (and
+Every earlier example required both sides of `--override` (and
 `closure-root`) to already be built store paths — meaning a first-time user
 had to run `nix build` twice themselves, by hand, before graft could do
 anything. That's a real ergonomics gap: Guix users never see a hash, since
 grafting is driven by a `replacement` field on a package, not a CLI argument.
 `src/installable.rs`'s `resolve` closes most of that gap without touching
 Guix's actual mechanism (a declarative field) — it just lets every
-path-taking CLI argument (`closure-root`, both sides of `--replace`,
+path-taking CLI argument (`closure-root`, both sides of `--override`,
 `--edit-drv`'s/`--edit`'s `path`) accept anything `nix build` itself accepts (a
 flake reference, a `.drv` path) or a legacy `file.nix`/`file.nix#attr`
 expression installable, building it via `derivation::nix_build` if it isn't
@@ -663,9 +695,9 @@ whatever the caller already does with it. Two reasons this matters, both
 caught by the existing test suite rather than reasoned out in advance:
 
 - **`replace`'s syntax-before-existence ordering.** `replace()` deliberately
-  checks `--replace`'s basename-length constraint *before* requiring either
+  checks `--override`'s basename-length constraint *before* requiring either
   side to exist (see §4/caveats — this is what lets it reject a bogus pair
-  fast, without touching the store). `--replace old old-longer-name` where
+  fast, without touching the store). `--override old old-longer-name` where
   `old-longer-name` was never built is exactly this test case: resolving it
   eagerly (via `nix build` or even just `canonicalize`) turns a clean
   "basenames differ in length" rejection into a confusing "don't know how to
@@ -815,7 +847,7 @@ the identical pattern, including labeling each per-path line "grafted" or
 regardless of which strategy actually ran).
 
 One correctness gap closed alongside this, not the point of the change:
-`replace()` now warns explicitly when an `old` from `--replace` isn't in
+`replace()` now warns explicitly when an `old` from `--override` isn't in
 `closure_root`'s closure at all, rather than silently doing nothing —
 checked once, right after the closure is computed, against the full
 `closure_paths` list.
@@ -944,7 +976,7 @@ are no more special-cased than those.
 
 Every build this tool does already forwards a trailing `-- <nix args>`
 verbatim to the underlying `nix build` call, so nothing here was ever
-*impossible* — `graft replace foo --replace a b -- -L --max-jobs 4` always
+*impossible* — `graft replace foo --override a b -- -L --max-jobs 4` always
 worked. But it meant knowing in advance which flags were "ours" (before
 `--`) versus "nix's" (after it), which is exactly the kind of thing someone
 coming from `nix build` shouldn't have to think about for the handful of
@@ -957,7 +989,7 @@ flags they reach for constantly.
 into `StrategyArgs` so every subcommand gets them automatically, same as
 `--cutoff`/`--out-link`/etc. already are. `--option` takes two separate
 values (`--option keep-going true`), matching nix's own two-value form
-exactly — the same convention `--replace` itself was moved to in §14, for
+exactly — the same convention `--override` itself was moved to in §14, for
 the same reason: consistency with `nix` wins over this project's own prior
 `name=value` habit, since the whole point is forwarding exactly what `nix`
 itself expects.
@@ -977,7 +1009,7 @@ which previously took no `nix_args` at all.
 `replace` and the three `edit <kind>` subcommands were always doing the
 same thing underneath — produce an `(old, new)` pair, then hand it to the
 exact same closure walk (§4) — differing only in *how* the pair gets
-produced: `--replace` takes it ready-made, `edit file` dumps/edits/re-adds
+produced: `--override` takes it ready-made, `edit file` dumps/edits/re-adds
 a file, `edit drv` edits a derivation's JSON and rebuilds, `edit nix`
 edits a `.nix` source and rebuilds an attribute. Four subcommands for one
 underlying operation meant picking exactly one of them per invocation,
@@ -987,7 +1019,7 @@ gap, not just a cosmetic one, since it meant "replace this dependency
 separate `graft` runs with two separate out-links to reconcile yourself.
 
 Collapsed into four flags on `replace` itself —
-`--replace`/`--edit`/`--edit-drv`/`--edit-nix` — each repeatable and
+`--override`/`--edit`/`--edit-drv`/`--edit-nix` — each repeatable and
 freely combinable in one invocation. `main.rs`'s `collect_pairs` is the
 one place all four converge: it resolves every occurrence of all four
 into `(PathBuf, PathBuf)` pairs and returns the combined list, which
@@ -998,9 +1030,9 @@ four flags for the same reason (`TransformArgs`, flattened into both
 
 Two concrete design choices fell out of this:
 
-- **`--replace`, `--edit`, and `--edit-drv` all moved to `nix`'s own
-  two-separate-values convention** (`--replace <old> <new>`, not
-  `--replace <old>=<new>`) instead of this project's prior `name=value`
+- **`--override`, `--edit`, and `--edit-drv` all moved to `nix`'s own
+  two-separate-values convention** (`--override <old> <new>`, not
+  `--override <old>=<new>`) instead of this project's prior `name=value`
   habit — the same motivation as §13's `--option`. For `--edit`/
   `--edit-drv` specifically, this also sidesteps a real ambiguity: a
   *repeatable* flag with an *optional* second value (the old
@@ -1014,7 +1046,7 @@ Two concrete design choices fell out of this:
 - **The `edit_*` modules' `run` functions were split into `produce_pair`.**
   Previously each one produced its `(old, new)` pair *and* called
   `replace::replace` itself, taking a full `ReplaceOptions` just to pass
-  it through. Now that several of these can combine with `--replace` and
+  it through. Now that several of these can combine with `--override` and
   each other in one invocation, pair-production has to finish for all of
   them *before* `replace()` runs once over the combined list — so
   `produce_pair` only does the former, dropping `ReplaceOptions`/
@@ -1024,8 +1056,19 @@ Two concrete design choices fell out of this:
   `--edit`) for its membership check, since that's the one piece of
   per-call state editing a file still genuinely needs.
 
-Verified with a new test combining `--replace` and `--edit` against two
+Verified with a new test combining `--override` and `--edit` against two
 independent branches of the same closure in one invocation
 (`replace_and_edit_combine_in_one_invocation_against_independent_nodes`),
 confirming both effects land in the final grafted result together — the
 one thing that was structurally impossible before this section's change.
+
+The flag itself was originally called `--replace`, which read awkwardly
+once it was a flag *on* a `replace` subcommand (`graft replace --replace
+...`) rather than the whole operation's name. Renamed to `--override`,
+matching what `nix`'s own `--override-input` already calls "swap this
+specific thing for that one" — `graft replace --override old new` reads
+the way the other three transform flags already did (a stated means of
+producing a pair, not a repeat of the subcommand's own name). Pure rename;
+`replace`'s own module/function/subcommand names were deliberately left
+alone, since the *operation* is still accurately called replace — only
+the one flag that used to share its name changed.

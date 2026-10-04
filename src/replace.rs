@@ -75,7 +75,7 @@ pub struct ReplaceOptions<'a> {
 ///
 /// Precedence when a path is affected by more than one of
 /// `replacements`/`opts.cutoffs`/`opts.force_rebuild`: an explicit
-/// `--replace` target wins over a cutoff, which wins over the default
+/// `--override` target wins over a cutoff, which wins over the default
 /// strategy — the same order nixpkgs documents for its own equivalent.
 pub fn replace(closure_root: &Path, replacements: &[(PathBuf, PathBuf)], opts: &ReplaceOptions) -> Result<ReplaceResult> {
     if opts.report_diff && opts.report.is_none() {
@@ -142,7 +142,7 @@ pub fn replace(closure_root: &Path, replacements: &[(PathBuf, PathBuf)], opts: &
     for (old, new) in &explicit {
         if !closure_paths.contains(old) {
             eprintln!(
-                "warning: {} is not in the closure of {} — this --replace will have no effect \
+                "warning: {} is not in the closure of {} — this will have no effect \
                  (nothing here can ever encounter it to substitute {})",
                 old.display(),
                 closure_root.display(),
@@ -383,7 +383,7 @@ struct Ctx<'a> {
 
 #[derive(Clone)]
 enum Category {
-    /// A literal `--replace` target: resolves to this path directly, never
+    /// A literal `--override` target: resolves to this path directly, never
     /// recursed into further.
     Explicit(PathBuf),
     /// Never touched, no matter what changed beneath it.
@@ -754,9 +754,24 @@ fn graft_recipe(path: &Path, all_refs: &[(PathBuf, PathBuf)]) -> Result<(PathBuf
     let sed = derivation::tool_path("sed")?;
     let nix_store = derivation::tool_path("nix-store")?;
     let name = store::store_name(path)?;
+    let old_self = store::basename(path)?;
 
+    // A self-reference (`path` embeds its own basename somewhere in its
+    // content) can't be rewritten the same way as a real dependency: the
+    // new basename isn't known in Rust at script-construction time — it's
+    // whatever `nix derivation add` ends up assigning this very derivation,
+    // which depends on this script's own text. Nix resolves that for
+    // ordinary derivations by computing the output path from the
+    // derivation's *declared structure* alone, never its content, and
+    // handing the result to the builder as `$out` before the builder runs
+    // — so there's no circularity to solve here, only a rewrite that has to
+    // happen inside the sandbox, after `$out` is known, instead of in this
+    // format string. `${out##*/}` is bash's own basename (no external
+    // `basename` binary needed, so no extra sandboxed input to declare for
+    // it); a no-op second pass when `path` has no self-reference at all,
+    // the common case.
     let script = format!(
-        "\"{ns}\" --dump \"{p}\" | \"{sed}\" '{expr}' | \"{ns}\" --restore \"$out\"",
+        "\"{ns}\" --dump \"{p}\" | \"{sed}\" '{expr}' | \"{sed}\" \"s|{old_self}|${{out##*/}}|g\" | \"{ns}\" --restore \"$out\"",
         ns = nix_store.display(),
         p = path.display(),
         sed = sed.display(),

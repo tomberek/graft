@@ -136,7 +136,7 @@ let pkgs = import <nixpkgs> {}; in rec {
   # grafting because their own leaf was replaced, but neither depends on
   # the other, so they belong to the same dependency level and should be
   # graftable in parallel. (The leaves themselves are the explicit
-  # --replace targets, resolved instantly with no build — parMidA/parMidB
+  # --override targets, resolved instantly with no build — parMidA/parMidB
   # are the first *actual* grafts, which is what makes them same-level.)
   parLeafA = pkgs.writeShellScriptBin "leaf-a" ''
     echo "a v1"
@@ -175,4 +175,20 @@ let pkgs = import <nixpkgs> {}; in rec {
     '';
   });
   pigzA = pkgs.pigz.override { zlib = zlibA; };
+
+  # Embeds its own `$out` in its content (a genuine self-reference,
+  # distinct from `selfRefDep`) *and* depends on something that changes —
+  # exercises graft's self-reference rewrite, not just its normal
+  # dependency-substitution path.
+  selfRefDep = pkgs.writeShellScriptBin "selfref-dep" ''echo "selfref dep v1"'';
+  selfRefDepV2 = pkgs.writeShellScriptBin "selfref-dep" ''echo "selfref dep v2"'';
+  selfRefConsumer = pkgs.runCommand "selfref-consumer" { } ''
+    mkdir -p $out/bin
+    cat > $out/bin/run <<EOF
+    #!${pkgs.bash}/bin/bash
+    echo "my own path is: $out"
+    ${selfRefDep}/bin/selfref-dep
+    EOF
+    chmod +x $out/bin/run
+  '';
 }

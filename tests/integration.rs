@@ -79,7 +79,7 @@ fn replace_grafts_a_consumer_without_rebuilding_it() {
     let consumer = nix_build("consumer");
 
     let output = graft(
-        &["replace", &consumer, "--replace", &old, &new],
+        &["replace", &consumer, "--override", &old, &new],
         None,
     );
     assert!(
@@ -113,7 +113,7 @@ fn replace_rejects_mismatched_length_basenames_before_touching_the_store() {
     let bogus_new = format!("{old}-longer-name");
 
     let output = graft(
-        &["replace", &consumer, "--replace", &old, &bogus_new],
+        &["replace", &consumer, "--override", &old, &bogus_new],
         None,
     );
     assert!(!output.status.success(), "replace should reject a length-mismatched pair");
@@ -135,11 +135,11 @@ fn rebuild_mode_does_a_real_rebuild_and_ignores_the_length_constraint() {
         "fixture invariant: oldDepLong/newDepLong must have different-length basenames"
     );
 
-    let graft_attempt = graft(&["replace", &consumer, "--replace", &old, &new], None);
+    let graft_attempt = graft(&["replace", &consumer, "--override", &old, &new], None);
     assert!(!graft_attempt.status.success(), "graft mode should still reject this pair");
 
     let output = graft(
-        &["replace", &consumer, "--replace", &old, &new, "--rebuild"],
+        &["replace", &consumer, "--override", &old, &new, "--rebuild"],
         None,
     );
     assert!(
@@ -242,7 +242,7 @@ fn cutoff_stops_propagation_and_leaves_everything_above_it_untouched() {
     let top = nix_build("chainTop");
 
     let output = graft(
-        &["replace", &top, "--replace", &leaf, &leaf_v2, "--cutoff", &mid],
+        &["replace", &top, "--override", &leaf, &leaf_v2, "--cutoff", &mid],
         None,
     );
     assert!(
@@ -266,7 +266,7 @@ fn force_rebuild_uses_rebuild_strategy_for_one_path_while_default_stays_graft() 
     let top = nix_build("chainTop");
 
     let output = graft(
-        &["replace", &top, "--replace", &leaf, &leaf_v2, "--force-rebuild", &mid],
+        &["replace", &top, "--override", &leaf, &leaf_v2, "--force-rebuild", &mid],
         None,
     );
     assert!(
@@ -303,7 +303,7 @@ fn rebuild_fails_loudly_when_a_reference_is_only_embedded_transitively() {
     let top = nix_build("transitiveTop");
 
     let rebuild_attempt = graft(
-        &["replace", &top, "--replace", &leaf, &leaf_v2, "--rebuild"],
+        &["replace", &top, "--override", &leaf, &leaf_v2, "--rebuild"],
         None,
     );
     assert!(!rebuild_attempt.status.success(), "--rebuild should fail loudly, not silently no-op");
@@ -315,7 +315,7 @@ fn rebuild_fails_loudly_when_a_reference_is_only_embedded_transitively() {
 
     // The same replacement succeeds under the default graft strategy, which
     // operates on realized bytes rather than declared structure.
-    let graft_output = graft(&["replace", &top, "--replace", &leaf, &leaf_v2], None);
+    let graft_output = graft(&["replace", &top, "--override", &leaf, &leaf_v2], None);
     assert!(
         graft_output.status.success(),
         "graft mode should succeed on the same fixture: {}",
@@ -335,7 +335,7 @@ fn rebuild_supports_a_multi_output_derivation() {
     let dep_v2 = nix_build("multiDepV2");
     let consumer = nix_build("multiConsumer");
 
-    let output = graft(&["replace", &consumer, "--replace", &dep, &dep_v2, "--rebuild"], None);
+    let output = graft(&["replace", &consumer, "--override", &dep, &dep_v2, "--rebuild"], None);
     assert!(
         output.status.success(),
         "graft replace --rebuild failed on a multi-output derivation: {}",
@@ -386,7 +386,7 @@ open(path, 'w').write('\n'.join(out) + '\n')
     );
 
     let output = graft(
-        &["replace", &top, "--replace", &leaf, &leaf_v2, "--interactive"],
+        &["replace", &top, "--override", &leaf, &leaf_v2, "--interactive"],
         Some(&editor),
     );
     assert!(
@@ -422,7 +422,7 @@ open(path, 'w').write('\n'.join(out) + '\n')
     );
 
     let output = graft(
-        &["replace", &top, "--replace", &leaf, &leaf_v2, "--interactive"],
+        &["replace", &top, "--override", &leaf, &leaf_v2, "--interactive"],
         Some(&editor),
     );
     assert!(
@@ -451,7 +451,7 @@ open(path, 'w').write('\n'.join(lines[:-1]) + '\n')
         &mut editors,
     );
     let output = graft(
-        &["replace", &top, "--replace", &leaf, &leaf_v2, "--interactive"],
+        &["replace", &top, "--override", &leaf, &leaf_v2, "--interactive"],
         Some(&delete_a_line),
     );
     assert!(!output.status.success(), "deleting a line from the interactive todo should be rejected");
@@ -465,7 +465,7 @@ fn dry_run_detects_rebuild_infeasibility_upfront_without_building_anything() {
     let top = nix_build("transitiveTop");
 
     let output = graft(
-        &["replace", &top, "--replace", &leaf, &leaf_v2, "--rebuild", "--dry-run"],
+        &["replace", &top, "--override", &leaf, &leaf_v2, "--rebuild", "--dry-run"],
         None,
     );
     assert!(
@@ -514,7 +514,7 @@ open(path, 'w').write('\n'.join(out) + '\n')
     );
 
     let output = graft(
-        &["replace", &top, "--replace", &leaf, &leaf_v2, "--rebuild", "--interactive"],
+        &["replace", &top, "--override", &leaf, &leaf_v2, "--rebuild", "--interactive"],
         Some(&force_rebuild),
     );
     assert!(!output.status.success(), "selecting `rebuild` on a known-infeasible line should be rejected");
@@ -528,14 +528,14 @@ open(path, 'w').write('\n'.join(out) + '\n')
 #[test]
 fn replace_accepts_file_hash_attr_installables_without_prebuilding() {
     // No `nix_build()` calls here at all — closure-root and both sides of
-    // --replace are given as installables and must be built by graft itself.
+    // --override are given as installables and must be built by graft itself.
     let fixture = fixture_path().display().to_string();
     let old_inst = format!("{fixture}#oldDep");
     let new_inst = format!("{fixture}#newDep");
     let consumer_inst = format!("{fixture}#consumer");
 
     let output = graft(
-        &["replace", &consumer_inst, "--replace", &old_inst, &new_inst],
+        &["replace", &consumer_inst, "--override", &old_inst, &new_inst],
         None,
     );
     assert!(
@@ -564,7 +564,7 @@ fn nixos_system_defaults_to_profile_without_switching() {
             "nixos-system",
             "--profile",
             profile_path.to_str().unwrap(),
-            "--replace",
+            "--override",
             &old, &new,
         ],
         None,
@@ -606,7 +606,7 @@ fn nixos_system_switch_registers_the_profile_and_runs_switch_to_configuration() 
         "nixos-system",
         "--profile",
         profile_path.to_str().unwrap(),
-        "--replace",
+        "--override",
         &old, &new,
         "--switch",
         "test",
@@ -646,7 +646,7 @@ fn replace_grafts_a_real_elf_binarys_embedded_rpath() {
     let run_orig = Command::new(format!("{consumer}/bin/consumer")).output().expect("failed to run original consumer");
     assert_eq!(String::from_utf8_lossy(&run_orig.stdout).trim(), "answer: 1");
 
-    let output = graft(&["replace", &consumer, "--replace", &old_lib, &new_lib], None);
+    let output = graft(&["replace", &consumer, "--override", &old_lib, &new_lib], None);
     assert!(
         output.status.success(),
         "graft replace on a real ELF binary failed: {}",
@@ -668,6 +668,42 @@ fn replace_grafts_a_real_elf_binarys_embedded_rpath() {
     let refs = nix_store_references(&grafted);
     assert!(refs.contains(&new_lib), "grafted binary should reference the new library: {refs:?}");
     assert!(!refs.contains(&old_lib), "grafted binary should not reference the old library: {refs:?}");
+}
+
+#[test]
+fn replace_rewrites_a_self_reference_to_the_grafted_result_s_own_path() {
+    // `selfRefConsumer` embeds its own `$out` in its content, independent
+    // of `selfRefDep` (the thing actually being replaced here) — a graft
+    // needs to update that self-reference too, not just the real
+    // dependency, or the result ends up pointing at its own pre-graft self
+    // instead of at itself.
+    let dep_old = nix_build("selfRefDep");
+    let dep_new = nix_build("selfRefDepV2");
+    let consumer = nix_build("selfRefConsumer");
+
+    let run_orig = Command::new(format!("{consumer}/bin/run")).output().expect("failed to run original selfref-consumer");
+    let orig_stdout = String::from_utf8_lossy(&run_orig.stdout).to_string();
+    assert!(orig_stdout.contains(&format!("my own path is: {consumer}")), "fixture invariant: {orig_stdout}");
+    assert!(orig_stdout.contains("selfref dep v1"));
+
+    let output = graft(&["replace", &consumer, "--override", &dep_old, &dep_new], None);
+    assert!(output.status.success(), "graft replace on a self-referencing fixture failed: {}", String::from_utf8_lossy(&output.stderr));
+    let grafted = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    assert_ne!(grafted, consumer);
+
+    let run = Command::new(format!("{grafted}/bin/run")).output().expect("failed to run grafted selfref-consumer");
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        stdout.contains(&format!("my own path is: {grafted}")),
+        "grafted result's self-reference should point at its own new path, not the pre-graft original: {stdout}"
+    );
+    assert!(stdout.contains("selfref dep v2"), "the real dependency should still be replaced too: {stdout}");
+
+    let refs = nix_store_references(&grafted);
+    assert!(refs.contains(&grafted), "grafted result should genuinely self-reference its own path: {refs:?}");
+    assert!(!refs.contains(&consumer), "grafted result should not reference the pre-graft original: {refs:?}");
+    assert!(refs.contains(&dep_new));
+    assert!(!refs.contains(&dep_old));
 }
 
 #[test]
@@ -703,7 +739,7 @@ fn replace_grafts_a_real_nixpkgs_package_then_ungrafts_it_back() {
     };
     assert!(compress_roundtrip(&pigz_a), "original pigz should round-trip compress/decompress correctly");
 
-    let grafted_output = graft(&["replace", &pigz_a, "--replace", &zlib_a, &zlib_b], None);
+    let grafted_output = graft(&["replace", &pigz_a, "--override", &zlib_a, &zlib_b], None);
     assert!(
         grafted_output.status.success(),
         "graft replace on a real nixpkgs package failed: {}",
@@ -717,7 +753,7 @@ fn replace_grafts_a_real_nixpkgs_package_then_ungrafts_it_back() {
     assert!(!grafted_refs.contains(&zlib_a), "grafted pigz should not reference the old zlib: {grafted_refs:?}");
     assert!(compress_roundtrip(&grafted), "grafted pigz should still round-trip compress/decompress correctly");
 
-    let ungrafted_output = graft(&["replace", &grafted, "--replace", &zlib_b, &zlib_a], None);
+    let ungrafted_output = graft(&["replace", &grafted, "--override", &zlib_b, &zlib_a], None);
     assert!(
         ungrafted_output.status.success(),
         "ungraft (replacing back to the original zlib) failed: {}",
@@ -740,7 +776,7 @@ fn replace_warns_when_old_is_not_in_the_closure() {
     let new = nix_build("newDep");
     let unrelated_root = nix_build("chainTop");
 
-    let output = graft(&["replace", &unrelated_root, "--replace", &old, &new], None);
+    let output = graft(&["replace", &unrelated_root, "--override", &old, &new], None);
     assert!(
         output.status.success(),
         "replace should still succeed, just warn: {}",
@@ -769,7 +805,7 @@ fn replace_out_link_creates_a_gc_root_symlink() {
         &[
             "replace",
             &consumer,
-            "--replace",
+            "--override",
             &old, &new,
             "--out-link",
             link_path.to_str().unwrap(),
@@ -797,7 +833,7 @@ fn out_link_writes_an_appending_provenance_history() {
     let link_path = link_dir.path().join("result");
     let history_path = link_dir.path().join("result.graft-history.jsonl");
 
-    let args = ["replace", &consumer, "--replace", &old, &new, "--out-link", link_path.to_str().unwrap()];
+    let args = ["replace", &consumer, "--override", &old, &new, "--out-link", link_path.to_str().unwrap()];
 
     // Run twice: history should accumulate, not just record the latest run.
     for _ in 0..2 {
@@ -830,7 +866,7 @@ fn dry_run_does_not_create_an_out_link() {
         &[
             "replace",
             &consumer,
-            "--replace",
+            "--override",
             &old, &new,
             "--out-link",
             link_path.to_str().unwrap(),
@@ -854,7 +890,7 @@ fn replace_grafts_two_independent_nodes_at_the_same_level_in_parallel() {
     let top = nix_build("parallelTop");
 
     let output = graft(
-        &["-v", "replace", &top, "--replace", &a, &a2, "--replace", &b, &b2],
+        &["-v", "replace", &top, "--override", &a, &a2, "--override", &b, &b2],
         None,
     );
     assert!(
@@ -886,9 +922,9 @@ fn replace_grafts_two_independent_nodes_at_the_same_level_in_parallel() {
 
 #[test]
 fn replace_and_edit_combine_in_one_invocation_against_independent_nodes() {
-    // --replace and --edit used to be mutually exclusive subcommands; now
+    // --override and --edit used to be mutually exclusive subcommands; now
     // they're flags on the same command, so one branch of the closure can
-    // be changed via --replace while a completely independent branch is
+    // be changed via --override while a completely independent branch is
     // changed via --edit, both grafted up through parallelTop in one pass.
     let a = nix_build("parLeafA");
     let a2 = nix_build("parLeafAV2");
@@ -899,12 +935,12 @@ fn replace_and_edit_combine_in_one_invocation_against_independent_nodes() {
     let editor = stub_editor(r#"echo "echo edited-marker" >> "$1""#, &mut editors);
 
     let output = graft(
-        &["replace", &top, "--replace", &a, &a2, "--edit", &mid_b, "bin/mid-b"],
+        &["replace", &top, "--override", &a, &a2, "--edit", &mid_b, "bin/mid-b"],
         Some(&editor),
     );
     assert!(
         output.status.success(),
-        "combined --replace/--edit failed: {}",
+        "combined --override/--edit failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let grafted = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -912,7 +948,7 @@ fn replace_and_edit_combine_in_one_invocation_against_independent_nodes() {
 
     let run = Command::new(format!("{grafted}/bin/parallel-top")).output().expect("failed to run grafted parallel-top");
     let stdout = String::from_utf8_lossy(&run.stdout);
-    assert!(stdout.contains("a v2"), "the --replace side should have propagated: {stdout}");
+    assert!(stdout.contains("a v2"), "the --override side should have propagated: {stdout}");
     assert!(stdout.contains("edited-marker"), "the --edit side should have propagated too: {stdout}");
     assert!(stdout.contains("b v1"), "leaf-b itself was never touched by either transform: {stdout}");
 
@@ -932,7 +968,7 @@ fn report_html_includes_every_changed_node_and_excludes_unchanged_ones() {
 
     let report_dir = tempfile::tempdir().unwrap();
     let output = graft(
-        &["replace", &top, "--replace", &old, &new, "--report", report_dir.path().to_str().unwrap()],
+        &["replace", &top, "--override", &old, &new, "--report", report_dir.path().to_str().unwrap()],
         None,
     );
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
@@ -960,7 +996,7 @@ fn report_html_shows_cutoff_nodes_but_still_excludes_unchanged_ones() {
         &[
             "replace",
             &top,
-            "--replace",
+            "--override",
             &old, &new,
             "--cutoff",
             &mid,
@@ -1011,7 +1047,7 @@ fn report_html_rows_a_cutoff_node_above_the_dependency_it_left_untouched() {
         &[
             "replace",
             &top,
-            "--replace",
+            "--override",
             &old, &new,
             "--cutoff",
             &mid,
@@ -1042,7 +1078,7 @@ fn report_html_under_dry_run_shows_pending_instead_of_a_built_path() {
         &[
             "replace",
             &consumer,
-            "--replace",
+            "--override",
             &old, &new,
             "--dry-run",
             "--report",
@@ -1063,14 +1099,14 @@ fn report_diff_without_report_is_rejected() {
     let new = nix_build("newDep");
     let consumer = nix_build("consumer");
 
-    let output = graft(&["replace", &consumer, "--replace", &old, &new, "--report-diff"], None);
+    let output = graft(&["replace", &consumer, "--override", &old, &new, "--report-diff"], None);
     assert!(!output.status.success(), "--report-diff without --report should be rejected");
     assert!(String::from_utf8_lossy(&output.stderr).contains("--report-diff has no effect without --report"));
 }
 
 #[test]
 fn report_diff_embeds_nix_diff_for_explicit_targets_but_not_grafted_ones() {
-    // `leaf` is the explicit --replace target (a real derivation diff
+    // `leaf` is the explicit --override target (a real derivation diff
     // exists to show); `mid`/`top` are grafted (no derivation change, so
     // no nix-diff — only diffoscope, which applies to any built old/new pair).
     let old = nix_build("chainLeaf");
@@ -1082,7 +1118,7 @@ fn report_diff_embeds_nix_diff_for_explicit_targets_but_not_grafted_ones() {
         &[
             "replace",
             &top,
-            "--replace",
+            "--override",
             &old, &new,
             "--report",
             report_dir.path().to_str().unwrap(),
