@@ -29,18 +29,18 @@ via the dev shell instead of `nix build`'s checkPhase:
 nix develop -c cargo test
 ```
 
-## Usage
-
-Replace a dependency throughout a closure:
+## The basic idea
 
 ```
 graft replace <closure-root> --replace <old> <new>
 ```
 
-This grafts every affected path bottom-up (a blind but fast NAR
-byte-substitution, same technique Guix and nixpkgs use), reporting each one
-as it happens plus a closing summary in the same spirit as Guix's own
-grafting output:
+Walks the closure rooted at `<closure-root>` bottom-up and, for every path
+that transitively references `<old>`, swaps it for `<new>` — a blind but
+fast NAR byte-substitution, the same technique Guix and nixpkgs use. Paths
+with no data dependency on each other graft concurrently rather than one
+at a time. Reports each one as it happens, plus a closing summary in the
+same spirit as Guix's own grafting output:
 
 ```
 grafted /nix/store/9f3a...-openssl-3.2.1 -> /nix/store/2b0e...-openssl-3.2.2
@@ -49,78 +49,129 @@ grafted /nix/store/7c1d...-curl-8.9.0 -> /nix/store/a84f...-curl-8.9.0
 /nix/store/a84f...-curl-8.9.0
 ```
 
-Paths with no data dependency between them (neither is an ancestor of the
-other) are grafted concurrently rather than one at a time.
-
 `<closure-root>` and both sides of `--replace` are installables, not just
-store paths — a flake reference (`nixpkgs#hello`), a `.drv` path, a
-`file.nix`/`file.nix#attr` expression, or a plain store path, built
-automatically if it isn't already. No need to `nix build` both sides
-yourself first:
+store paths — a flake reference, a `.drv` path, a `file.nix`/`file.nix#attr`
+expression, or a plain store path, built automatically if it isn't already:
 
 ```
 graft replace .#myImage --replace nixpkgs#openssl nixpkgs#openssl_3_2
 ```
 
-Useful flags (all repeatable where noted):
+## Editing instead of replacing
+
+Three more flags let you make a small edit and have `graft` derive the
+`old`/`new` pair for you, rather than supplying a pre-built one. All four
+— including `--replace` — may be repeated and freely combined in a single
+invocation, grafting every result up through the closure together in one
+pass.
+
+**`--edit <path> <subpath>`** — dump `<path>`, open `$EDITOR` on
+`<subpath>` inside it (`.` for the whole tree), re-add the edited tree,
+graft the result up:
+
+```
+$ graft replace $CONSUMER --edit $CONSUMER bin/consumer
+1 explicit replacement, 6 unchanged (7 total)
+/nix/store/v5qzm6...-consumer
+
+$ cat /nix/store/v5qzm6...-consumer/bin/consumer
+#!/nix/store/.../bash
+/nix/store/.../dependency/bin/dependency
+
+patched locally        # whatever you changed in $EDITOR
+```
+
+**`--edit-drv <path> <output>`** — open `$EDITOR` on `<path>`'s
+derivation JSON (`env`/`builder`/`args`), do one real sandboxed rebuild,
+graft the new output up. `<output>` disambiguates which output to edit
+when `<path>` is a bare `.drv` with more than one — pass `.` to infer it
+(works if there's exactly one, or `<path>` is already a specific output):
+
+```
+$ graft replace $MULTI_EXTRA --edit-drv $MULTI_EXTRA .
+1 explicit replacement, 6 unchanged (7 total)
+/nix/store/paybdn...-multi-extra
+```
+
+**`--edit-nix <file.nix[#attr]>`** — open `$EDITOR` on the actual `.nix`
+source backing a file-based installable, rebuild just that attribute,
+graft the new output up:
+
+```
+$ graft replace $ORIG --edit-nix pkg.nix
+1 explicit replacement, 5 unchanged (6 total)
+/nix/store/wm1zq6...-greeter
+
+$ /nix/store/wm1zq6...-greeter/bin/greeter
+hello v2                # whatever "hello v1" became in $EDITOR
+```
+
+Combine them when the two changes are unrelated — one dependency swap and
+one hand-edited file, grafted together instead of two separate runs with
+two out-links to reconcile yourself:
+
+```
+graft replace /run/current-system \
+  --replace nixpkgs#openssl nixpkgs#openssl_3_2 \
+  --edit "$(readlink -f /etc/foo.conf)" .
+```
+
+(`--edit`'s `path` needs the real store path, not an `/etc` symlink to it
+— `readlink -f` resolves that, the same way you'd find it to inspect it
+manually.)
+
+## Flags
+
+Strategy — how propagation above a change is handled:
 
 - `--dry-run` — report what would happen without touching the store.
 - `--rebuild` — do a real sandboxed rebuild instead of grafting (mirrors
   Guix's `--no-grafts`); no equal-length-basename constraint, but every
   affected path needs a known deriver.
-- `--cutoff <path>` — never touch this path, no matter what changed beneath
-  it; propagation stops there. Use for anything a blind substitution could
-  corrupt (e.g. a NixOS closure's embedded store database).
-- `--force-rebuild <path>` / `--force-graft <path>` — override the
-  graft/rebuild strategy for one specific path.
+- `--cutoff <path>` (repeatable) — never touch this path, no matter what
+  changed beneath it; propagation stops there. Use for anything a blind
+  substitution could corrupt (e.g. a NixOS closure's embedded store
+  database).
+- `--force-rebuild <path>` / `--force-graft <path>` (repeatable) —
+  override the graft/rebuild strategy for one specific path.
 - `-i`/`--interactive` — open `$EDITOR` on a `git rebase -i`-style list of
-  every affected path and its strategy, edit, save to apply.
-- `-o`/`--out-link <path>` — create a GC-root symlink at `path` pointing at
-  the result, like `nix build -o`. Every build here otherwise passes
+  every affected path and its strategy; edit the words, save, apply.
+
+Output and provenance:
+
+- `-o`/`--out-link <path>` — create a GC-root symlink at `path` pointing
+  at the result, like `nix build -o`. Every build here otherwise passes
   `--no-link`, so without this the result isn't protected from a
   concurrent garbage collection. Also appends one line to
-  `<path>.graft-history.jsonl` (timestamp, exact command, resulting path) —
-  `--out-link` only ever points at the *latest* generation, so this is what
-  makes "what did I graft into this last week" answerable afterward.
+  `<path>.graft-history.jsonl` (timestamp, exact command, resulting path)
+  — `--out-link` only ever points at the *latest* generation, so this is
+  what makes "what did I graft into this last week" answerable afterward.
 - `--report <dir>` — write `<dir>/index.html`: a dependency graph (colored
-  by strategy, laid out by the same level a path was scheduled at) plus a
-  details table of everything grafted, rebuilt, or explicitly replaced.
-  Self-contained, no CDN. Works under `--dry-run` too.
+  by strategy) plus a details table of everything grafted, rebuilt, or
+  explicitly replaced. Self-contained, no CDN. Works under `--dry-run` too.
 - `--report-diff` (needs `--report`) — embed `nix-diff` (why an explicit
   replacement or rebuild differs — not shown for plain grafts, since
   grafting never changes the derivation) and link each node's `diffoscope`
   artifact diff. Needs `nix-diff`/`diffoscope` on `PATH` (in this project's
   own `nix develop` shell already).
-- The common `nix build`/`nix eval` flags are available directly, under
-  their real `nix` names and shorts, forwarded to every underlying `nix
-  build` call: `-L`/`--print-build-logs`, `-j`/`--max-jobs`, `--cores`,
-  `--builders`, `--option <name> <value>`, `--impure`, `--offline`,
-  `--refresh`, `-k`/`--keep-going`, `--fallback`, `--show-trace`.
+
+The common `nix build`/`nix eval` flags are available directly, under
+their real `nix` names and shorts, forwarded to every underlying `nix
+build` call — no need to remember which flags are "ours" vs. "nix's":
+
+- `-L`/`--print-build-logs`, `-j`/`--max-jobs`, `--cores`, `--builders`,
+  `--option <name> <value>`, `--impure`, `--offline`, `--refresh`,
+  `-k`/`--keep-going`, `--fallback`, `--show-trace`.
 - `-- <nix args>` — anything after a literal `--` is forwarded too, for
   anything not covered above (e.g. `-- --eval-store <url>`).
 
-`graft --version` reports the installed version.
+`graft --version` reports the installed version. Run `graft replace
+--help` for the full list with descriptions.
 
-Instead of supplying a pre-built `old`/`new` pair yourself, three more
-flags let you make a small edit and have `graft` derive the pair for you —
-and all four, including `--replace`, may be repeated and freely combined
-in a single invocation, grafting every result up through the closure
-together in one pass:
+## `graft nixos-system`
 
-```
-graft replace <closure-root> --edit <path> <subpath>  # edit a file in a built output (`.` for the whole tree)
-graft replace <closure-root> --edit-drv <path> <output>  # edit a derivation's JSON and rebuild it (`.` to infer the output)
-graft replace <closure-root> --edit-nix <file.nix>[#attr]  # edit the .nix source and rebuild it
-```
-
-e.g. `graft replace /run/current-system --replace nixpkgs#openssl nixpkgs#openssl_3_2 --edit "$(readlink -f /etc/foo.conf)" .`
-replaces openssl *and* hand-edits a config file in the same closure walk
-(`--edit`'s `path` needs the real store path, not an `/etc` symlink to
-it — `readlink -f` resolves that, the same way you'd find it to inspect
-it manually). Run `graft replace --help` for the full flag list.
-
-Patch the currently running NixOS system without looking up its path first
-(same transform flags as `replace`):
+Patch the currently running NixOS system without looking up its path
+first — same transform/strategy/output flags as `replace`:
 
 ```
 graft nixos-system --replace nixpkgs#openssl nixpkgs#openssl_3_2
@@ -131,6 +182,56 @@ Defaults to `/nix/var/nix/profiles/system` (override with `--profile`); add
 via `switch-to-configuration` (same action names as `nixos-rebuild`) —
 without `--switch`, it only reports the new path and prints the two
 commands you'd run to apply it yourself.
+
+## Examples
+
+Preview what a graft would do, without touching the store:
+
+```
+graft replace .#myImage --replace nixpkgs#openssl nixpkgs#openssl_3_2 --dry-run
+```
+
+Do a real rebuild instead of a byte-level graft, protect the result from
+GC, and write an HTML report of what happened:
+
+```
+graft replace .#myImage \
+  --replace nixpkgs#openssl nixpkgs#openssl_3_2 \
+  --rebuild --out-link ./result --report ./report
+```
+
+Replace two independent dependencies in one pass, forcing one of them to
+use the rebuild strategy regardless of the (default-graft) global mode:
+
+```
+graft replace .#myImage \
+  --replace nixpkgs#openssl nixpkgs#openssl_3_2 \
+  --replace nixpkgs#curl nixpkgs#curl_8_9 \
+  --force-rebuild /nix/store/...-curl-8.9.0
+```
+
+Never touch a NixOS closure's embedded store database while grafting
+everything else above a changed package:
+
+```
+graft nixos-system --replace nixpkgs#openssl nixpkgs#openssl_3_2 \
+  --cutoff /nix/store/...-nixos-system-registration
+```
+
+Walk through every affected path interactively, picking a strategy per
+node like `git rebase -i`:
+
+```
+graft replace .#myImage --replace nixpkgs#openssl nixpkgs#openssl_3_2 --interactive
+```
+
+Build with full logs streamed live and a pinned job count, forwarding
+straight into the underlying `nix build` the same way you'd call `nix
+build` itself:
+
+```
+graft replace .#myImage --replace nixpkgs#openssl nixpkgs#openssl_3_2 -L -j4
+```
 
 ## Status
 
