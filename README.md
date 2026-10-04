@@ -65,12 +65,12 @@ Three more flags let you make a small edit and have `graft` derive the
 invocation, grafting every result up through the closure together in one
 pass.
 
-**`--edit <path> <subpath>`** — dump `<path>`, open `$EDITOR` on
+**`--override-file <path> <subpath>`** — dump `<path>`, open `$EDITOR` on
 `<subpath>` inside it (`.` for the whole tree), re-add the edited tree,
 graft the result up:
 
 ```
-$ graft replace $CONSUMER --edit $CONSUMER bin/consumer
+$ graft replace $CONSUMER --override-file $CONSUMER bin/consumer
 1 explicit replacement, 6 unchanged (7 total)
 /nix/store/v5qzm6...-consumer
 
@@ -81,24 +81,24 @@ $ cat /nix/store/v5qzm6...-consumer/bin/consumer
 patched locally        # whatever you changed in $EDITOR
 ```
 
-**`--edit-drv <path> <output>`** — open `$EDITOR` on `<path>`'s
+**`--override-drv <path> <output>`** — open `$EDITOR` on `<path>`'s
 derivation JSON (`env`/`builder`/`args`), do one real sandboxed rebuild,
 graft the new output up. `<output>` disambiguates which output to edit
 when `<path>` is a bare `.drv` with more than one — pass `.` to infer it
 (works if there's exactly one, or `<path>` is already a specific output):
 
 ```
-$ graft replace $MULTI_EXTRA --edit-drv $MULTI_EXTRA .
+$ graft replace $MULTI_EXTRA --override-drv $MULTI_EXTRA .
 1 explicit replacement, 6 unchanged (7 total)
 /nix/store/paybdn...-multi-extra
 ```
 
-**`--edit-nix <file.nix[#attr]>`** — open `$EDITOR` on the actual `.nix`
+**`--override-nix <file.nix[#attr]>`** — open `$EDITOR` on the actual `.nix`
 source backing a file-based installable, rebuild just that attribute,
 graft the new output up:
 
 ```
-$ graft replace $ORIG --edit-nix pkg.nix
+$ graft replace $ORIG --override-nix pkg.nix
 1 explicit replacement, 5 unchanged (6 total)
 /nix/store/wm1zq6...-greeter
 
@@ -113,10 +113,10 @@ two out-links to reconcile yourself:
 ```
 graft replace /run/current-system \
   --override nixpkgs#openssl nixpkgs#openssl_3_2 \
-  --edit "$(readlink -f /etc/foo.conf)" .
+  --override-file "$(readlink -f /etc/foo.conf)" .
 ```
 
-(`--edit`'s `path` needs the real store path, not an `/etc` symlink to it
+(`--override-file`'s `path` needs the real store path, not an `/etc` symlink to it
 — `readlink -f` resolves that, the same way you'd find it to inspect it
 manually.)
 

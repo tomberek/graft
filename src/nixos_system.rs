@@ -25,7 +25,7 @@ impl SwitchAction {
 
 /// `graft replace`, with `closure_root` already resolved from `profile` and
 /// `replacements` already resolved from whatever mix of
-/// `--override`/`--edit`/`--edit-drv`/`--edit-nix` was given — see
+/// `--override`/`--override-file`/`--override-drv`/`--override-nix` was given — see
 /// `main.rs`'s `collect_pairs`. `profile` itself is still needed here,
 /// for `activate()`'s `nix-env --set`, which is the other half of what
 /// defaulting to a NixOS system profile means: not just reading its

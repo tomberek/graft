@@ -206,28 +206,29 @@ struct TransformArgs {
     /// Override `old` with `new` throughout the closure — the same name
     /// `nix`'s own `--override-input` uses for "swap this specific thing".
     /// `old`/`new` are installables, same forms as `closure-root`. May be
-    /// repeated; may be combined with --edit/--edit-drv/--edit-nix.
+    /// repeated; may be combined with --override-file/--override-drv/--override-nix.
     #[arg(long = "override", num_args = 2, value_names = ["old", "new"])]
     overrides: Vec<String>,
-    /// Edit a file inside an already-built store path and graft the
-    /// result up through the closure. `subpath` is relative to `path`'s
-    /// own root; pass `.` for the whole tree. May be repeated; may be
-    /// combined with --override/--edit-drv/--edit-nix.
-    #[arg(long = "edit", num_args = 2, value_names = ["path", "subpath"])]
-    edit: Vec<String>,
-    /// Edit a derivation's JSON (env/builder/args) and rebuild just that
-    /// node. `output` disambiguates which output to edit when `path` is a
-    /// bare `.drv` with more than one (ignored otherwise, since a plain
-    /// output path is already unambiguous) — pass `.` to infer it, which
-    /// only works if there's exactly one. May be repeated; may be combined
-    /// with --override/--edit/--edit-nix.
-    #[arg(long = "edit-drv", num_args = 2, value_names = ["path", "output"])]
-    edit_drv: Vec<String>,
-    /// Edit the .nix file backing a file-based installable
-    /// (`path/to/file.nix[#attr]`) and rebuild just that attribute. May be
-    /// repeated; may be combined with --override/--edit/--edit-drv.
-    #[arg(long = "edit-nix", value_name = "file.nix[#attr]")]
-    edit_nix: Vec<String>,
+    /// Override a file inside an already-built store path by hand-editing
+    /// it, and graft the result up through the closure. `subpath` is
+    /// relative to `path`'s own root; pass `.` for the whole tree. May be
+    /// repeated; may be combined with --override/--override-drv/--override-nix.
+    #[arg(long = "override-file", num_args = 2, value_names = ["path", "subpath"])]
+    override_file: Vec<String>,
+    /// Override a derivation's JSON (env/builder/args) by hand-editing it,
+    /// and rebuild just that node. `output` disambiguates which output to
+    /// edit when `path` is a bare `.drv` with more than one (ignored
+    /// otherwise, since a plain output path is already unambiguous) — pass
+    /// `.` to infer it, which only works if there's exactly one. May be
+    /// repeated; may be combined with --override/--override-file/--override-nix.
+    #[arg(long = "override-drv", num_args = 2, value_names = ["path", "output"])]
+    override_drv: Vec<String>,
+    /// Override the .nix file backing a file-based installable
+    /// (`path/to/file.nix[#attr]`) by hand-editing it, and rebuild just
+    /// that attribute. May be repeated; may be combined with
+    /// --override/--override-file/--override-drv.
+    #[arg(long = "override-nix", value_name = "file.nix[#attr]")]
+    override_nix: Vec<String>,
 }
 
 #[derive(Subcommand)]
@@ -273,33 +274,33 @@ enum Cmd {
 
 /// Resolves every transform flag in `transforms` into `(old, new)` pairs
 /// and gathers them into one list — see [`TransformArgs`]'s doc comment
-/// for why this is the one place all four converge. `--edit`'s closure
-/// membership check is computed at most once, not once per `--edit`, since
-/// several may be combined in one invocation.
+/// for why this is the one place all four converge. `--override-file`'s
+/// closure membership check is computed at most once, not once per
+/// `--override-file`, since several may be combined in one invocation.
 fn collect_pairs(closure_root: &Path, nix_args: &[String], transforms: TransformArgs) -> Result<Vec<(PathBuf, PathBuf)>> {
-    let TransformArgs { overrides, edit, edit_drv, edit_nix } = transforms;
+    let TransformArgs { overrides, override_file, override_drv, override_nix } = transforms;
     let mut pairs = Vec::new();
     for pair in overrides.chunks(2) {
         pairs.push((installable::resolve(&pair[0], nix_args)?, installable::resolve(&pair[1], nix_args)?));
     }
-    if !edit.is_empty() {
+    if !override_file.is_empty() {
         let closure = store::closure(closure_root)?;
-        for pair in edit.chunks(2) {
+        for pair in override_file.chunks(2) {
             let path = installable::resolve(&pair[0], nix_args)?;
             let subpath = if pair[1] == "." { None } else { Some(PathBuf::from(&pair[1])) };
             pairs.push(edit_file::produce_pair(closure_root, &closure, &path, subpath.as_deref())?);
         }
     }
-    for pair in edit_drv.chunks(2) {
+    for pair in override_drv.chunks(2) {
         let path = installable::resolve(&pair[0], nix_args)?;
         let output = if pair[1] == "." { None } else { Some(pair[1].as_str()) };
         pairs.push(edit_drv::produce_pair(&path, output, nix_args)?);
     }
-    for installable_str in &edit_nix {
+    for installable_str in &override_nix {
         pairs.push(edit_nix::produce_pair(installable_str, nix_args)?);
     }
     if pairs.is_empty() {
-        bail!("at least one of --override, --edit, --edit-drv, or --edit-nix is required");
+        bail!("at least one of --override, --override-file, --override-drv, or --override-nix is required");
     }
     Ok(pairs)
 }

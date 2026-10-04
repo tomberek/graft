@@ -98,8 +98,8 @@ graft replace <closure-root> --override <old> <new> [--override <old> <new> ...]
 ```
 
 Anything after a literal `--` is forwarded verbatim to every `nix build`
-call this makes to realise a graft (same for `--edit-drv`'s and
-`--edit-nix`'s own build calls — see §14). This isn't speculative: while testing this locally, the
+call this makes to realise a graft (same for `--override-drv`'s and
+`--override-nix`'s own build calls — see §14). This isn't speculative: while testing this locally, the
 build for a graft derivation stalled for a full minute because this
 environment has a remote build machine configured
 (`ssh://builder@remote-builder.example.com`) that's unreachable here,
@@ -231,7 +231,7 @@ outside Nix's C++ implementation. Rather than reimplement
 output path, reads the *actual* value back out of `nix derivation add`'s own
 error message (`derivation has incorrect output '...', should be '...'`),
 patches it in, and retries — safe only because Nix itself validates the
-correction each time. The exact same trick is reused by `--edit-drv` (see
+correction each time. The exact same trick is reused by `--override-drv` (see
 below), which has the identical problem for a different reason (there, the
 user edited the derivation's `env`/`args` directly).
 
@@ -272,7 +272,7 @@ Two real, verified differences from graft mode:
 
 `--rebuild` controls only propagation *above* whatever a transform flag
 produced — the leaf action itself (the file edit, or the initial rebuild
-`--edit-drv`/`--edit-nix` already does to produce their own `new`) is
+`--override-drv`/`--override-nix` already does to produce their own `new`) is
 unaffected either way (see §14).
 
 ### `--cutoff`/`--force-rebuild`: per-path strategy, not just a global switch
@@ -292,7 +292,7 @@ stale — internally inconsistent output that looks fine until something
 reads that registration data expecting it to be true.
 
 So `replace` takes two more path lists — shared by every transform flag,
-since `--edit`/`--edit-drv`/`--edit-nix` all funnel their produced pairs
+since `--override-file`/`--override-drv`/`--override-nix` all funnel their produced pairs
 into the same walk (§14) — mirroring nixpkgs's `replaceDependencies`'s
 `cutoffPackages` option:
 
@@ -342,11 +342,11 @@ it to the exact same `replace` engine (walking the rewrite up through
 `C`) — originally three separate `edit <kind>` subcommands, unified with
 `--override` into one combinable set of flags on `replace` itself; see §14
 for why and how. Each also takes a trailing `-- <extra nix args>`,
-forwarded to its own build step (`--edit-drv`'s and `--edit-nix`'s initial
-rebuild; `--edit` has none of its own) and to every graft built on top of
+forwarded to its own build step (`--override-drv`'s and `--override-nix`'s initial
+rebuild; `--override-file` has none of its own) and to every graft built on top of
 it via `replace`.
 
-**`--edit <path> <subpath>`** — dump `<path>`, restore to a scratch
+**`--override-file <path> <subpath>`** — dump `<path>`, restore to a scratch
 directory, open `$EDITOR` on `<subpath>` (or the whole extracted tree, if
 `<subpath>` is `.`), re-add via `--add-fixed --recursive` as `new`. No
 same-length constraint here: this is an ordinary file edit inside a NAR,
@@ -360,7 +360,7 @@ sandboxed-build recipe for an arbitrary user edit, which is a meaningfully
 bigger problem than the fixed dump/sed/restore recipe `replace` needed — left
 as a known limitation rather than solved here (see caveats below).
 
-**`--edit-drv <path> <output>`** — `nix derivation show <path>`'s deriver
+**`--override-drv <path> <output>`** — `nix derivation show <path>`'s deriver
 returns `{"derivations": {"<basename>.drv": {...ATerm-JSON...}}}`; the
 inner object (minus the `derivations` wrapper) is exactly what `nix
 derivation add` accepts back — confirmed by round-tripping an unmodified
@@ -379,7 +379,7 @@ build <drv>^out` actually builds the edited derivation (there's no way
 around one real, sandboxed rebuild here — the recipe changed, not just a
 reference) and its output feeds `replace` as `(old, new)`.
 
-**`--edit-nix <file.nix[#attr]>`** — the one place this tool does use
+**`--override-nix <file.nix[#attr]>`** — the one place this tool does use
 Nix-language evaluation, deliberately scoped to a single attribute rather
 than nixpkgs's whole-closure IFD walk. Best-effort: records the
 installable's current output path (if it has one), opens `$EDITOR` on
@@ -467,8 +467,8 @@ Feeds the same `(old, new)` into `replace`.
 - **`nix store add` never registers references** (see §4 — discovered via
   its legacy predecessor `nix-store --add-fixed`, and confirmed the modern
   command has the identical behavior) — a real bug this tool has to route
-  around for `replace`/`--edit-drv` (via a synthetic derivation build) but
-  still carries for `--edit`, which has no equivalent workaround yet. A
+  around for `replace`/`--override-drv` (via a synthetic derivation build) but
+  still carries for `--override-file`, which has no equivalent workaround yet. A
   file edit that references another store path will silently produce a
   store item with no recorded reference to it.
 - **No substituter trust story.** Every grafted or rebuilt path here was
@@ -482,7 +482,7 @@ Feeds the same `(old, new)` into `replace`.
 - **The `nix derivation add` output-path retry loop (§4) is inherently
   fragile** — it depends on the exact wording of two specific Nix error
   messages, shared by `replace`'s synthetic-derivation construction and by
-  `--edit-drv`. If a future Nix version changes that wording, the loop just
+  `--override-drv`. If a future Nix version changes that wording, the loop just
   fails closed (an unrecognized error aborts it) rather than silently doing
   the wrong thing, but it's worth calling out as the shakiest part of this
   prototype.
@@ -599,7 +599,7 @@ todo list: it runs the exact same `would_change` discovery walk `--dry-run`
 uses to find every affected path, writes one line per path as `<strategy>
 <path>` (defaulting to whatever the already-configured flags say) with a
 git-rebase-todo-style instructional comment block, opens `$EDITOR` on it
-(reusing `editor::edit`, already shared by `--edit`/`--edit-drv`), and
+(reusing `editor::edit`, already shared by `--override-file`/`--override-drv`), and
 parses the result back into the same `cutoffs`/`force_rebuild`/`force_graft`
 sets — no new engine, since the walk itself never changes. Deliberately
 narrower than git's version: no reordering (dependency order is
@@ -683,7 +683,7 @@ grafting is driven by a `replacement` field on a package, not a CLI argument.
 `src/installable.rs`'s `resolve` closes most of that gap without touching
 Guix's actual mechanism (a declarative field) — it just lets every
 path-taking CLI argument (`closure-root`, both sides of `--override`,
-`--edit-drv`'s/`--edit`'s `path`) accept anything `nix build` itself accepts (a
+`--override-drv`'s/`--override-file`'s `path`) accept anything `nix build` itself accepts (a
 flake reference, a `.drv` path) or a legacy `file.nix`/`file.nix#attr`
 expression installable, building it via `derivation::nix_build` if it isn't
 already realized.
@@ -704,22 +704,22 @@ caught by the existing test suite rather than reasoned out in advance:
   build this path" error, since the existence check now happens *before*
   `replace()` ever gets to run its own syntax check. Passing store-path-shaped
   strings through untouched preserves the original ordering exactly.
-- **`--edit-drv`'s bare-`.drv` + output disambiguation.** A bare `.drv`
-  path for a multi-output derivation, combined with `--edit-drv`'s second
+- **`--override-drv`'s bare-`.drv` + output disambiguation.** A bare `.drv`
+  path for a multi-output derivation, combined with `--override-drv`'s second
   value (the output name, or `.` to infer), is meant to let
   `edit_drv::produce_pair` pick a specific output *after* the fact via
   `derivation::locate_output`. Running that `.drv` path through `nix build`
   during resolution would both build it prematurely and collapse the
   disambiguation this flag exists for (a bare `nix build <drv>` with no
   `^output` builds every output, not the one you asked for). Verified
-  directly against the `multiOut` fixture: `--edit-drv <drv> extra` still
+  directly against the `multiOut` fixture: `--override-drv <drv> extra` still
   resolves the `extra` output specifically, not `out`.
 
 Everything that isn't store-path-shaped goes through two branches: a
 `#`-split first component that exists on disk and ends in `.nix` is treated
 as a legacy `-f file.nix [attr]` installable (matching `edit_nix.rs`'s own
 long-standing installable parsing, which `resolve` doesn't replace —
-`--edit-nix` still has its own narrower parser, since it distinguishes "already
+`--override-nix` still has its own narrower parser, since it distinguishes "already
 built" from "needs building" for a different reason); everything else is
 handed to `nix build` as-is, covering flake references and anything else the
 modern CLI resolves natively. `derivation::nix_build` — the actual `nix
@@ -1019,7 +1019,7 @@ gap, not just a cosmetic one, since it meant "replace this dependency
 separate `graft` runs with two separate out-links to reconcile yourself.
 
 Collapsed into four flags on `replace` itself —
-`--override`/`--edit`/`--edit-drv`/`--edit-nix` — each repeatable and
+`--override`/`--override-file`/`--override-drv`/`--override-nix` — each repeatable and
 freely combinable in one invocation. `main.rs`'s `collect_pairs` is the
 one place all four converge: it resolves every occurrence of all four
 into `(PathBuf, PathBuf)` pairs and returns the combined list, which
@@ -1030,18 +1030,18 @@ four flags for the same reason (`TransformArgs`, flattened into both
 
 Two concrete design choices fell out of this:
 
-- **`--override`, `--edit`, and `--edit-drv` all moved to `nix`'s own
+- **`--override`, `--override-file`, and `--override-drv` all moved to `nix`'s own
   two-separate-values convention** (`--override <old> <new>`, not
   `--override <old>=<new>`) instead of this project's prior `name=value`
-  habit — the same motivation as §13's `--option`. For `--edit`/
-  `--edit-drv` specifically, this also sidesteps a real ambiguity: a
+  habit — the same motivation as §13's `--option`. For `--override-file`/
+  `--override-drv` specifically, this also sidesteps a real ambiguity: a
   *repeatable* flag with an *optional* second value (the old
   `edit file <root> <path> [<subpath>]` positional shape) can't be
   expressed as a flat, repeated multi-value `clap` arg without losing
   which values belong to which occurrence. Fixed arity avoids that
   entirely, at the cost of a sentinel for "no second value really needed":
-  `.` means "the whole tree" for `--edit`'s `subpath`, and "infer the
-  output automatically" for `--edit-drv`'s `output` (which only works if
+  `.` means "the whole tree" for `--override-file`'s `subpath`, and "infer the
+  output automatically" for `--override-drv`'s `output` (which only works if
   there's exactly one, same as leaving `--output` off before).
 - **The `edit_*` modules' `run` functions were split into `produce_pair`.**
   Previously each one produced its `(old, new)` pair *and* called
@@ -1053,10 +1053,10 @@ Two concrete design choices fell out of this:
   `closure_root` entirely where they were only ever used to call
   `replace()` at the end. `edit_file::produce_pair` keeps a `closure`
   slice parameter (computed once in `collect_pairs`, not once per
-  `--edit`) for its membership check, since that's the one piece of
+  `--override-file`) for its membership check, since that's the one piece of
   per-call state editing a file still genuinely needs.
 
-Verified with a new test combining `--override` and `--edit` against two
+Verified with a new test combining `--override` and `--override-file` against two
 independent branches of the same closure in one invocation
 (`replace_and_edit_combine_in_one_invocation_against_independent_nodes`),
 confirming both effects land in the final grafted result together — the
@@ -1072,3 +1072,13 @@ producing a pair, not a repeat of the subcommand's own name). Pure rename;
 `replace`'s own module/function/subcommand names were deliberately left
 alone, since the *operation* is still accurately called replace — only
 the one flag that used to share its name changed.
+
+The other three transform flags went through the same move for the same
+reason: `--edit`/`--edit-drv`/`--edit-nix` became `--override-file`/
+`--override-drv`/`--override-nix`, so all four now share one `--override*`
+family — exactly the pattern `nix` itself already uses for
+`--override-input`/`--override-flake` (two different kinds of override,
+one shared prefix). Pure rename again; `edit_file`/`edit_drv`/`edit_nix`'s
+module and `produce_pair` function names stayed put, since "edit" is still
+an accurate description of *how* each one derives its pair — only the
+flags needed to read as a family.

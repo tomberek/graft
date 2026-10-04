@@ -181,12 +181,12 @@ fn edit_file_grafts_a_hand_edited_file_up_through_the_closure() {
     let editor = stub_editor(r#"echo "edited-marker" >> "$1""#, &mut editors);
 
     let output = graft(
-        &["replace", &consumer, "--edit", &consumer, "bin/consumer"],
+        &["replace", &consumer, "--override-file", &consumer, "bin/consumer"],
         Some(&editor),
     );
     assert!(
         output.status.success(),
-        "graft replace --edit failed: {}",
+        "graft replace --override-file failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let grafted = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -217,10 +217,10 @@ json.dump(d, open(path, 'w'))
         &mut editors,
     );
 
-    let output = graft(&["replace", &consumer, "--edit-drv", &consumer, "."], Some(&editor));
+    let output = graft(&["replace", &consumer, "--override-drv", &consumer, "."], Some(&editor));
     assert!(
         output.status.success(),
-        "graft replace --edit-drv failed: {}",
+        "graft replace --override-drv failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let grafted = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -922,10 +922,10 @@ fn replace_grafts_two_independent_nodes_at_the_same_level_in_parallel() {
 
 #[test]
 fn replace_and_edit_combine_in_one_invocation_against_independent_nodes() {
-    // --override and --edit used to be mutually exclusive subcommands; now
+    // --override and --override-file used to be mutually exclusive subcommands; now
     // they're flags on the same command, so one branch of the closure can
     // be changed via --override while a completely independent branch is
-    // changed via --edit, both grafted up through parallelTop in one pass.
+    // changed via --override-file, both grafted up through parallelTop in one pass.
     let a = nix_build("parLeafA");
     let a2 = nix_build("parLeafAV2");
     let mid_b = nix_build("parMidB");
@@ -935,12 +935,12 @@ fn replace_and_edit_combine_in_one_invocation_against_independent_nodes() {
     let editor = stub_editor(r#"echo "echo edited-marker" >> "$1""#, &mut editors);
 
     let output = graft(
-        &["replace", &top, "--override", &a, &a2, "--edit", &mid_b, "bin/mid-b"],
+        &["replace", &top, "--override", &a, &a2, "--override-file", &mid_b, "bin/mid-b"],
         Some(&editor),
     );
     assert!(
         output.status.success(),
-        "combined --override/--edit failed: {}",
+        "combined --override/--override-file failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let grafted = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -949,7 +949,7 @@ fn replace_and_edit_combine_in_one_invocation_against_independent_nodes() {
     let run = Command::new(format!("{grafted}/bin/parallel-top")).output().expect("failed to run grafted parallel-top");
     let stdout = String::from_utf8_lossy(&run.stdout);
     assert!(stdout.contains("a v2"), "the --override side should have propagated: {stdout}");
-    assert!(stdout.contains("edited-marker"), "the --edit side should have propagated too: {stdout}");
+    assert!(stdout.contains("edited-marker"), "the --override-file side should have propagated too: {stdout}");
     assert!(stdout.contains("b v1"), "leaf-b itself was never touched by either transform: {stdout}");
 
     let run_orig = Command::new(format!("{top}/bin/parallel-top")).output().unwrap();
