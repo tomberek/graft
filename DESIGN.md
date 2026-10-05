@@ -1327,7 +1327,22 @@ single unambiguous match, successfully overridden and run) and
 paths sharing one name, both referenced by the same consumer via symlink —
 `--override-name` must refuse listing both, `graft find` must list both).
 
-## 19. Shell completions
+## 19. `graft diff`: a read-only shortcut for the common preview
+
+`replace <closure-root> --override <old> <new> --dry-run` already does
+the real work of previewing a graft, but it means spelling out the full
+`replace` surface (strategy flags, out-link, report) just to ask "what
+would this touch?" `graft diff <closure-root> <old> <new>` is a thin
+wrapper (`main.rs::run_diff`) around the exact same path: resolve `old`/
+`new` through `resolve_override` (so it gets `^*` support for free, same
+as `--override`) and call `replace::replace` with `dry_run: true` and
+every other `ReplaceOptions` field at its default — no new reporting
+logic, no new engine code, just a shorter way to reach the existing one.
+`--rebuild` is the one flag it exposes directly (mapped to
+`full_rebuild`), since checking rebuild feasibility before committing to
+it is exactly the kind of thing a preview command is for.
+
+## 20. Shell completions
 
 `graft completions <shell>` (`clap_complete`, generated from the same
 `Cli`/`Cmd`/`Args` structs `clap`'s derive already builds the parser

@@ -64,6 +64,24 @@ expression, or a plain store path, built automatically if it isn't already:
 graft replace .#myImage --override nixpkgs#openssl nixpkgs#openssl_3_2
 ```
 
+## Previewing first
+
+`graft diff <closure-root> <old> <new>` is read-only sugar for `replace
+<closure-root> --override <old> <new> --dry-run` — no other flags to
+think about, so it's the fastest way to see what a replacement would touch
+before deciding how to apply it:
+
+```
+$ graft diff .#myImage nixpkgs#openssl nixpkgs#openssl_3_2
+[dry-run] /nix/store/9f3a...-openssl-3.2.1 is an explicit replacement target -> /nix/store/2b0e...-openssl-3.2.2
+[dry-run] would graft /nix/store/7c1d...-curl-8.9.0
+[dry-run] 1 grafted, 1 explicit replacement, 54 unchanged (57 total)
+```
+
+Add `--rebuild` to preview under the rebuild strategy instead — useful to
+check feasibility (see "Flags" below) before committing to `replace
+--rebuild` for real.
+
 ## Editing instead of replacing
 
 `--edit <path> <selector>` lets you make a small edit and have `graft`

@@ -102,6 +102,86 @@ fn completions_prints_a_nonempty_script_for_every_supported_shell() {
 }
 
 #[test]
+fn diff_reports_what_would_graft_without_touching_the_store() {
+    let old = nix_build("oldDep");
+    let new = nix_build("newDep");
+    let consumer = nix_build("consumer");
+
+    let output = graft(&["diff", &consumer, &old, &new], None);
+    assert!(
+        output.status.success(),
+        "graft diff failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).trim().is_empty(),
+        "graft diff is read-only and should print nothing to stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("would graft") && stderr.contains("1 grafted"),
+        "expected a dry-run graft preview, got: {stderr}"
+    );
+
+    // Nothing should actually have been built: the original consumer still
+    // reports the old dependency.
+    let run = Command::new(format!("{consumer}/bin/consumer"))
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout).trim(),
+        "got old dependency"
+    );
+}
+
+#[test]
+fn diff_rebuild_previews_feasibility_without_the_length_constraint() {
+    let old = nix_build("oldDepLong");
+    let new = nix_build("newDepLong");
+    let consumer = nix_build("consumerLong");
+
+    // Without --rebuild, the length mismatch is a hard error even for a
+    // read-only preview — diff shouldn't hide that.
+    let plain = graft(&["diff", &consumer, &old, &new], None);
+    assert!(
+        !plain.status.success(),
+        "graft diff should reject a length-mismatched pair without --rebuild"
+    );
+
+    let output = graft(&["diff", &consumer, &old, &new, "--rebuild"], None);
+    assert!(
+        output.status.success(),
+        "graft diff --rebuild failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("would rebuild"),
+        "expected a dry-run rebuild preview, got: {stderr}"
+    );
+}
+
+#[test]
+fn diff_warns_when_old_is_not_in_the_closure() {
+    let old = nix_build("oldDep");
+    let new = nix_build("newDep");
+    let unrelated_root = nix_build("chainTop");
+
+    let output = graft(&["diff", &unrelated_root, &old, &new], None);
+    assert!(
+        output.status.success(),
+        "graft diff should still succeed, just warn: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("not in the closure of") && stderr.contains("no effect"),
+        "expected the no-op warning, got: {stderr}"
+    );
+}
+
+#[test]
 fn replace_grafts_a_consumer_without_rebuilding_it() {
     let old = nix_build("oldDep");
     let new = nix_build("newDep");

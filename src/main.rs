@@ -250,6 +250,28 @@ enum Cmd {
         /// Package name (or `name-version`) to search for.
         name: String,
     },
+    /// Preview what grafting <old> to <new> would touch inside the closure
+    /// of <closure-root>, without touching the store — read-only sugar for
+    /// `replace <closure-root> --override <old> <new> --dry-run`, with no
+    /// other flags to think about first.
+    Diff {
+        /// A store path, flake reference, `.drv` path, or `file.nix[#attr]`
+        /// installable — built automatically if not already realized.
+        closure_root: String,
+        /// The same forms --override accepts, including `^*` (all outputs).
+        old: String,
+        new: String,
+        /// Preview under the --rebuild strategy instead of the default
+        /// graft — useful to check rebuild feasibility before committing.
+        #[arg(long)]
+        rebuild: bool,
+        #[command(flatten)]
+        nix_common: NixPassthroughArgs,
+        /// Extra flags forwarded to the underlying `nix build` calls this
+        /// makes to resolve installables, e.g. `-- --eval-store <url>`.
+        #[arg(last = true)]
+        nix_args: Vec<String>,
+    },
     /// Replace, edit, or rebuild one or more things, grafting every result
     /// up through the closure rooted at <closure-root> in a single pass.
     Replace {
@@ -513,6 +535,21 @@ fn main() -> Result<()> {
             return Ok(());
         }
         Cmd::Find { closure_root, name } => return run_find(&closure_root, &name),
+        Cmd::Diff {
+            closure_root,
+            old,
+            new,
+            rebuild,
+            nix_common,
+            nix_args,
+        } => {
+            let nix_args = {
+                let mut a = nix_common.to_args();
+                a.extend(nix_args);
+                a
+            };
+            return run_diff(&closure_root, &old, &new, rebuild, &nix_args);
+        }
         Cmd::Replace {
             closure_root,
             transforms,
@@ -596,6 +633,34 @@ fn run_find(closure_root: &str, name: &str) -> Result<()> {
             ),
         }
     }
+    Ok(())
+}
+
+/// `graft diff`: resolves `old`/`new` the same way `--override` does
+/// (including `^*`) and runs `replace()` in `--dry-run` mode with every
+/// other strategy knob at its default — the read-only preview path, with
+/// no out-link/report/cutoff/interactive flags to think about first.
+fn run_diff(
+    closure_root: &str,
+    old: &str,
+    new: &str,
+    rebuild: bool,
+    nix_args: &[String],
+) -> Result<()> {
+    let closure_root = installable::resolve(closure_root, nix_args)?;
+    let pairs = resolve_override(old, new, nix_args)?;
+    let opts = ReplaceOptions {
+        dry_run: true,
+        nix_args,
+        full_rebuild: rebuild,
+        cutoffs: &[],
+        force_rebuild: &[],
+        force_graft: &[],
+        interactive: false,
+        report: None,
+        report_diff: false,
+    };
+    replace::replace(&closure_root, &pairs, &opts)?;
     Ok(())
 }
 
