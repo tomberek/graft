@@ -421,6 +421,7 @@ fn detect_edit(
         closure,
         &resolved,
         subpath,
+        nix_args,
     )?])
 }
 

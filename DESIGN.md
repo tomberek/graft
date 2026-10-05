@@ -350,18 +350,41 @@ of its own) and to every graft built on top of it via `replace`.
 
 **File-edit** (`path` resolves to a plain output) — dump `path`, restore
 to a scratch directory, open `$EDITOR` on `selector` (or the whole
-extracted tree, if `selector` is `.`), re-add via `--add-fixed
---recursive` as `new`. No same-length constraint here: this is an
-ordinary file edit inside a NAR, which encodes explicit lengths per entry
-— unlike the pure reference-swap case, content can grow or shrink freely.
-This mechanism *does* still use the simpler, ultimately-rejected
-`--add-fixed` approach from the `replace` design discussion above, and
-inherits its reference-registration gap: if your edit introduces or
-preserves a reference to another store path, that reference won't be
-registered. Fixing that properly would mean generating a sandboxed-build
-recipe for an arbitrary user edit, which is a meaningfully bigger problem
-than the fixed dump/sed/restore recipe `replace` needed — left as a known
-limitation rather than solved here (see caveats below).
+extracted tree, if `selector` is `.`). No same-length constraint here:
+this is an ordinary file edit inside a NAR, which encodes explicit
+lengths per entry — unlike the pure reference-swap case, content can grow
+or shrink freely.
+
+This mechanism originally stopped at `--add-fixed --recursive` (the
+simpler, ultimately-rejected approach from the `replace` design discussion
+above) and inherited its reference-registration gap wholesale: an edit
+that introduced or preserved a reference to another store path produced a
+store item with no recorded reference to it at all, silently. Fixing that
+properly means exactly what the `replace` discussion above said it would
+— generating a sandboxed-build recipe, not just `nix store add` — just for
+an *arbitrary* user edit instead of a known `(old, new)` substitution,
+which is what made it a meaningfully bigger problem at the time: there's
+no fixed set of candidate references to declare, since the edit can
+introduce a reference to anything.
+
+The actual fix turned out not to need a different KIND of recipe, just
+one extra step. `store::scan_references` does what the problem needed all
+along: a byte-level scan of the edited tree for anything that looks like
+`/nix/store/<hash>-<name>`, keeping only the ones that actually exist.
+Nix's own post-build scan never searches the whole store — it only ever
+matches a build's *declared* inputs — so once the edited tree is staged
+into the store (`--add-fixed --recursive`, same as before, now purely an
+intermediate: sandboxed builds can only see declared store-path inputs,
+never an arbitrary host directory, so this step still has to happen
+*somewhere*), a *second* pass — the same dump/restore recipe
+`replace::graft_recipe` already uses, with the staged path plus every
+`scan_references` hit declared as `inputSrcs` — gives the daemon a correct
+candidate set to register them against. Verified by editing a fixture
+that starts with zero references to embed one and confirming it's
+registered afterward
+(`edit_registers_a_reference_the_edit_itself_introduces`), where the old
+implementation would have silently produced zero regardless of what the
+edit actually embedded.
 
 **Drv-edit** (`path` resolves to a bare `.drv`) — `nix derivation show
 <path>`'s deriver returns `{"derivations": {"<basename>.drv":
@@ -470,14 +493,6 @@ into `replace`.
   now errors instead of silently rebuilding an unmodified derivation (see
   §6). Multi-output derivations are fully supported as of §6, which used to
   be a separate, harder limitation here.
-- **`nix store add` never registers references** (see §4 — discovered via
-  its legacy predecessor `nix-store --add-fixed`, and confirmed the modern
-  command has the identical behavior) — a real bug this tool has to route
-  around for `replace`/`--edit`'s drv-edit mechanism (via a synthetic
-  derivation build) but still carries for its file-edit mechanism, which
-  has no equivalent workaround yet. A
-  file edit that references another store path will silently produce a
-  store item with no recorded reference to it.
 - **No substituter trust story.** Every grafted or rebuilt path here was
   produced locally; no binary cache has ever seen it, so there's nothing that
   will substitute it elsewhere, and no mechanism here to sign or publish one.

@@ -1,5 +1,6 @@
 use crate::log;
 use anyhow::{bail, Context, Result};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -185,6 +186,79 @@ pub fn restore(nar: &[u8], target: &Path) -> Result<()> {
         bail!("nix-store --restore {} failed", target.display());
     }
     Ok(())
+}
+
+/// Scans every file (and symlink target) under `dir` for `/nix/store/
+/// <hash>-<name>` references embedded in its content — a raw byte scan,
+/// not a UTF-8 one, since edited content can be binary — returning each
+/// *existing* top-level store item found. Nix's own post-build reference
+/// scan only ever registers references among a build's *declared* inputs,
+/// never an unbounded scan of the whole store, so this is what lets
+/// `edit_file`'s synthetic-derivation re-add (see its own doc comment)
+/// declare the right `inputSrcs` for the daemon to actually find them in.
+pub fn scan_references(dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut found = HashSet::new();
+    scan_dir(dir, &mut found)?;
+    let mut out: Vec<PathBuf> = found.into_iter().collect();
+    out.sort();
+    Ok(out)
+}
+
+fn scan_dir(dir: &Path, found: &mut HashSet<PathBuf>) -> Result<()> {
+    for entry in std::fs::read_dir(dir)
+        .with_context(|| format!("failed to read directory {}", dir.display()))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("failed to stat {}", path.display()))?;
+        if file_type.is_symlink() {
+            if let Ok(target) = std::fs::read_link(&path) {
+                scan_bytes(target.as_os_str().as_encoded_bytes(), found);
+            }
+        } else if file_type.is_dir() {
+            scan_dir(&path, found)?;
+        } else if file_type.is_file() {
+            let bytes = std::fs::read(&path)
+                .with_context(|| format!("failed to read {}", path.display()))?;
+            scan_bytes(&bytes, found);
+        }
+    }
+    Ok(())
+}
+
+fn scan_bytes(bytes: &[u8], found: &mut HashSet<PathBuf>) {
+    let needle = format!("{STORE_DIR}/").into_bytes();
+    let mut start = 0;
+    while start + needle.len() <= bytes.len() {
+        let Some(offset) = bytes[start..]
+            .windows(needle.len())
+            .position(|w| w == needle)
+        else {
+            break;
+        };
+        let after = start + offset + needle.len();
+        let mut end = after;
+        while end < bytes.len() && is_path_byte(bytes[end]) {
+            end += 1;
+        }
+        let token = &bytes[after..end];
+        let basename_end = token.iter().position(|&b| b == b'/').unwrap_or(token.len());
+        if basename_end > 0 {
+            if let Ok(name) = std::str::from_utf8(&token[..basename_end]) {
+                let candidate = PathBuf::from(format!("{STORE_DIR}/{name}"));
+                if candidate.exists() {
+                    found.insert(candidate);
+                }
+            }
+        }
+        start = after;
+    }
+}
+
+fn is_path_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'+' | b'/')
 }
 
 /// `nix store add --mode nar --hash-algo sha256 <dir>`: content-address

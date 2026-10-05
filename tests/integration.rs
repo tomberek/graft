@@ -355,6 +355,50 @@ fn edit_detects_a_nix_file_on_disk_and_rebuilds_the_attribute() {
 }
 
 #[test]
+fn edit_registers_a_reference_the_edit_itself_introduces() {
+    // editRefTarget starts with zero references (plain text); editing its
+    // config file to embed editRefDep's store path should register that
+    // reference -- nix store add alone (the old implementation) never
+    // registers anything at all, regardless of what the content embeds.
+    let dep = nix_build("editRefDep");
+    let target = nix_build("editRefTarget");
+    assert!(
+        nix_store_references(&target).is_empty(),
+        "fixture invariant: editRefTarget should start with no references"
+    );
+
+    let mut editors = Vec::new();
+    let editor = stub_editor(
+        &format!(r#"echo "use dep: {dep}/bin/edit-ref-dep" >> "$1""#),
+        &mut editors,
+    );
+
+    let output = graft(
+        &["replace", &target, "--edit", &target, "config"],
+        Some(&editor),
+    );
+    assert!(
+        output.status.success(),
+        "graft replace --edit failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let grafted = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    assert_ne!(grafted, target);
+
+    let contents = fs::read_to_string(format!("{grafted}/config")).unwrap();
+    assert!(
+        contents.contains(&dep),
+        "edited config should contain the embedded reference: {contents}"
+    );
+
+    let refs = nix_store_references(&grafted);
+    assert!(
+        refs.contains(&dep),
+        "the introduced reference should be registered, not silently dropped: {refs:?}"
+    );
+}
+
+#[test]
 fn cutoff_stops_propagation_and_leaves_everything_above_it_untouched() {
     let leaf = nix_build("chainLeaf");
     let leaf_v2 = nix_build("chainLeafV2");

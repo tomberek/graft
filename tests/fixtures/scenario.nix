@@ -211,4 +211,13 @@ let pkgs = import <nixpkgs> {}; in rec {
     ln -s ${multiAllOld} $out/out-link
     ln -s ${multiAllOld.extra} $out/extra-link
   '';
+
+  # Starts with zero references; --edit-ing config to embed one should
+  # register it, exercising store::scan_references + the synthetic-
+  # derivation re-add (nix store add alone never registers anything).
+  editRefDep = pkgs.writeShellScriptBin "edit-ref-dep" ''echo "edit ref dep"'';
+  editRefTarget = pkgs.runCommand "edit-ref-target" { } ''
+    mkdir -p $out
+    echo "nothing here yet" > $out/config
+  '';
 }
