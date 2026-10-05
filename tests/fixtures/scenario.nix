@@ -231,4 +231,17 @@ let pkgs = import <nixpkgs> {}; in rec {
     mkdir -p $out
     echo "${builtins.substring 0 32 (baseNameOf "${bareHashDep}")}" > $out/bare-ref
   '';
+
+  # Two real `.so` files, same filename, deliberately different SONAMEs
+  # (via -Wl,-soname) -- exercises the best-effort SONAME-mismatch warning.
+  sonameLibOld = pkgs.runCommand "soname-lib" { nativeBuildInputs = [ pkgs.gcc ]; } ''
+    mkdir -p $out/lib
+    echo 'int f(void) { return 1; }' > lib.c
+    cc -shared -fPIC -Wl,-soname,libfoo.so.1 -o $out/lib/libfoo.so.1 lib.c
+  '';
+  sonameLibNewMismatch = pkgs.runCommand "soname-lib" { nativeBuildInputs = [ pkgs.gcc ]; } ''
+    mkdir -p $out/lib
+    echo 'int f(void) { return 2; }' > lib.c
+    cc -shared -fPIC -Wl,-soname,libfoo.so.2 -o $out/lib/libfoo.so.1 lib.c
+  '';
 }

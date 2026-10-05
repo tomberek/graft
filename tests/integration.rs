@@ -441,6 +441,29 @@ fn replace_rewrites_a_bare_hash_reference_with_no_name_suffix() {
 }
 
 #[test]
+fn replace_warns_on_a_soname_mismatch_but_still_grafts() {
+    // sonameLibOld/sonameLibNewMismatch both ship lib/libfoo.so.1, but
+    // built with different -Wl,-soname values -- a best-effort warning,
+    // not a hard failure: the graft should still succeed either way.
+    let old = nix_build("sonameLibOld");
+    let new = nix_build("sonameLibNewMismatch");
+
+    let output = graft(&["replace", &old, "--override", &old, &new], None);
+    assert!(
+        output.status.success(),
+        "a SONAME mismatch should warn, not fail, the graft: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("SONAME")
+            && stderr.contains("libfoo.so.1")
+            && stderr.contains("libfoo.so.2"),
+        "expected a SONAME mismatch warning naming both sonames, got: {stderr}"
+    );
+}
+
+#[test]
 fn cutoff_stops_propagation_and_leaves_everything_above_it_untouched() {
     let leaf = nix_build("chainLeaf");
     let leaf_v2 = nix_build("chainLeafV2");

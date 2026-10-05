@@ -293,6 +293,9 @@ fn collect_pairs(
     if pairs.is_empty() {
         bail!("at least one of --override or --edit is required");
     }
+    for (old, new) in &pairs {
+        derivation::warn_on_soname_mismatch(old, new);
+    }
     Ok(pairs)
 }
 

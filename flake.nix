@@ -14,9 +14,9 @@
           default = pkgs.mkShell {
             # bash/gnused must be store paths (declarable as derivation
             # inputs); the ambient /usr/bin/bash isn't.
-            # nix-diff/diffoscope are diagnostic tooling for `--report-diff`,
-            # not core functionality — dev-shell only, not in the packaged
-            # binary's wrapped PATH.
+            # nix-diff/diffoscope/binutils (for readelf) are diagnostic
+            # tooling, not core functionality — dev-shell only, not in the
+            # packaged binary's wrapped PATH.
             packages = [
               pkgs.cargo
               pkgs.rustc
@@ -27,6 +27,7 @@
               pkgs.gnused
               pkgs.nix-diff
               pkgs.diffoscope
+              pkgs.binutils
             ];
           };
         });

@@ -667,3 +667,67 @@ pub fn add_out_link(target: &Path, link: &Path, nix_args: &[String]) -> Result<(
     }
     Ok(())
 }
+
+/// Best-effort SONAME compatibility check for a graft pair that might be
+/// a shared library — Guix's manual explicitly calls grafting a
+/// mismatched-SONAME library the caller's own responsibility; this at
+/// least warns instead of staying silent about it. Never fails the graft
+/// itself: a missing `readelf`, or anything that isn't a shared library
+/// to begin with, is simply skipped. Only checks `lib`/`lib64` directly
+/// under `old`/`new` (not a full recursive walk) — covers the common case
+/// without the cost of scanning an entire closure member's tree.
+pub fn warn_on_soname_mismatch(old: &Path, new: &Path) {
+    for libdir in ["lib", "lib64"] {
+        let Ok(entries) = std::fs::read_dir(old.join(libdir)) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let old_so = entry.path();
+            let Some(file_name) = old_so.file_name() else {
+                continue;
+            };
+            if !looks_like_shared_lib(file_name) {
+                continue;
+            }
+            let new_so = new.join(libdir).join(file_name);
+            if !new_so.exists() {
+                continue;
+            }
+            if let (Some(old_soname), Some(new_soname)) = (soname(&old_so), soname(&new_so)) {
+                if old_soname != new_soname {
+                    eprintln!(
+                        "warning: {} has SONAME `{old_soname}`, but {} has `{new_soname}` — \
+                         grafting a shared library with a different SONAME can break dynamic \
+                         linking for anything that depends on it",
+                        old_so.display(),
+                        new_so.display()
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn looks_like_shared_lib(name: &std::ffi::OsStr) -> bool {
+    name.to_str().is_some_and(|s| s.contains(".so"))
+}
+
+fn soname(path: &Path) -> Option<String> {
+    let output = Command::new("readelf")
+        .args(["-d", "-W"])
+        .arg(path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.lines().find_map(|line| {
+        if !line.contains("SONAME") {
+            return None;
+        }
+        let start = line.find('[')?;
+        let end = line.find(']')?;
+        Some(line[start + 1..end].to_string())
+    })
+}

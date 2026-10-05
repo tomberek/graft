@@ -446,6 +446,29 @@ exact location), then runs `nix build <installable> --no-link
 --print-out-paths` to get the new output. Feeds the same `(old, new)`
 into `replace`.
 
+**SONAME warning.** Guix's manual is explicit that grafting a shared
+library requires matching `SONAME`, and that checking this is the
+caller's job — grafting doesn't change that, but it can at least stop
+leaving the caller to find out the hard way. `derivation::
+warn_on_soname_mismatch` runs once per final `(old, new)` pair in
+`collect_pairs` (not inside the recursive walk — the pair itself is what
+changed, not every downstream node that happens to depend on it, so
+checking once avoids repeating the same warning for every propagated
+graft above it). It looks only at `lib`/`lib64` directly under each side
+(not a full recursive walk — covers the common case cheaply), matches
+`.so`/`.so.N` files by filename between old and new, and shells out to
+`readelf -d -W` to pull each one's `SONAME` entry straight out of its
+`.dynamic` section. A mismatch prints a warning, never fails the graft:
+Guix's own stance is that this is advisory, and `readelf` isn't even on
+the packaged binary's wrapped `PATH` (dev-shell only, like
+`nix-diff`/`diffoscope` — diagnostic tooling, not core functionality), so
+a missing `readelf` has to be a silent no-op, not an error, for the
+packaged binary to work at all. Verified with two real `.so` files built
+via `gcc -Wl,-soname,...` with deliberately different SONAMEs, confirming
+the warning fires and names both — and, implicitly, that it doesn't fire
+for anything that isn't a shared library at all, since every other test
+in this suite never shows one.
+
 ## 5. Known caveats
 
 - **Blind text substitution can corrupt unrelated data.** If a store path's
@@ -480,9 +503,12 @@ into `replace`.
   byte-identical to the pre-graft original — confirming grafting is a
   reversible, lossless operation on something real, not just on this
   project's own synthetic fixtures.
-- **No SONAME/ABI check.** Guix's manual explicitly warns that grafting a
-  shared library requires matching `SONAME` and binary compatibility; this
-  tool doesn't check either — that's on the caller.
+- **Still no full ABI check.** `derivation::warn_on_soname_mismatch` (see
+  §4) covers `SONAME` specifically, the one piece Guix's manual calls out
+  by name and the one piece a cheap `readelf -d` comparison can actually
+  answer; true ABI compatibility (symbol versioning, struct layout, etc.)
+  is a much harder problem this tool makes no attempt at — that's still on
+  the caller.
 - **`--rebuild` can still fail to find a substitution point, though now it
   says so.** It only recognizes a dependency as a whole `inputs.drvs`/
   `inputs.srcs` entry (matched by output name, see §6) or a literal
