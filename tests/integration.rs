@@ -85,6 +85,23 @@ fn graft(args: &[&str], editor: Option<&Path>) -> std::process::Output {
 }
 
 #[test]
+fn completions_prints_a_nonempty_script_for_every_supported_shell() {
+    for shell in ["bash", "zsh", "fish", "elvish", "powershell"] {
+        let output = graft(&["completions", shell], None);
+        assert!(
+            output.status.success(),
+            "graft completions {shell} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("graft"),
+            "expected a completion script mentioning `graft` for {shell}, got: {stdout}"
+        );
+    }
+}
+
+#[test]
 fn replace_grafts_a_consumer_without_rebuilding_it() {
     let old = nix_build("oldDep");
     let new = nix_build("newDep");

@@ -1326,3 +1326,13 @@ single unambiguous match, successfully overridden and run) and
 `nameMatchDupA`/`nameMatchDupB`/`nameMatchDupConsumer` (two distinct store
 paths sharing one name, both referenced by the same consumer via symlink —
 `--override-name` must refuse listing both, `graft find` must list both).
+
+## 19. Shell completions
+
+`graft completions <shell>` (`clap_complete`, generated from the same
+`Cli`/`Cmd`/`Args` structs `clap`'s derive already builds the parser
+from — one definition, not two to keep in sync) prints a completion
+script for `bash`/`zsh`/`fish`/`elvish`/`powershell` to stdout. No new
+state or behavior to maintain: every flag/subcommand completion stays
+correct automatically as the CLI itself changes, since it's generated
+from the live `Cli::command()`, not a hand-maintained script.

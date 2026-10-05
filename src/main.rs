@@ -14,7 +14,8 @@ mod report;
 mod store;
 
 use anyhow::{bail, Context, Result};
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, CommandFactory, Parser, Subcommand};
+use clap_complete::Shell;
 use replace::ReplaceOptions;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -234,6 +235,10 @@ struct TransformArgs {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Print a shell completion script to standard output, e.g.
+    /// `graft completions bash > /etc/bash_completion.d/graft` or `graft
+    /// completions zsh > "${fpath[1]}/_graft"`.
+    Completions { shell: Shell },
     /// Search the closure of <closure-root> for a path matching <name> —
     /// read-only, same matching `--override-name` uses, so you can see
     /// what it would resolve to (or why it's ambiguous) before committing
@@ -503,6 +508,10 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     log::set_verbose(cli.verbose);
     let (result, out_link, nix_args) = match cli.command {
+        Cmd::Completions { shell } => {
+            clap_complete::generate(shell, &mut Cli::command(), "graft", &mut std::io::stdout());
+            return Ok(());
+        }
         Cmd::Find { closure_root, name } => return run_find(&closure_root, &name),
         Cmd::Replace {
             closure_root,

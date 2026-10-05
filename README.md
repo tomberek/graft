@@ -201,6 +201,11 @@ build` call — no need to remember which flags are "ours" vs. "nix's":
 `graft --version` reports the installed version. Run `graft replace
 --help` for the full list with descriptions.
 
+`graft completions <shell>` prints a completion script for `bash`, `zsh`,
+`fish`, `elvish`, or `powershell` — e.g. `graft completions bash >
+/etc/bash_completion.d/graft` or `graft completions zsh >
+"${fpath[1]}/_graft"`.
+
 ## `graft nixos-system`
 
 Patch the currently running NixOS system without looking up its path
