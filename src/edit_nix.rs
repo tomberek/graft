@@ -13,7 +13,7 @@ use std::process::Command;
 pub fn produce_pair(installable: &str, nix_args: &[String]) -> Result<(PathBuf, PathBuf)> {
     let (file, attr) = parse_installable(installable);
     if !file.exists() {
-        bail!("`--override-nix` only supports file-based installables; could not find `{}` on disk", file.display());
+        bail!("`--edit` only supports file-based installables; could not find `{}` on disk", file.display());
     }
     let old = current_output(&file, attr.as_deref())?;
     log::v(format!("current output of {}: {}", installable, old.display()));

@@ -59,18 +59,23 @@ graft replace .#myImage --override nixpkgs#openssl nixpkgs#openssl_3_2
 
 ## Editing instead of replacing
 
-Three more flags let you make a small edit and have `graft` derive the
-`old`/`new` pair for you, rather than supplying a pre-built one. All four
-— including `--override` — may be repeated and freely combined in a single
-invocation, grafting every result up through the closure together in one
-pass.
+`--edit <path> <selector>` lets you make a small edit and have `graft`
+derive the `old`/`new` pair for you, rather than supplying a pre-built
+one. It figures out *how* to edit `path` automatically, from what `path`
+turns out to be — you don't pick a mode up front:
 
-**`--override-file <path> <subpath>`** — dump `<path>`, open `$EDITOR` on
-`<subpath>` inside it (`.` for the whole tree), re-add the edited tree,
-graft the result up:
+- `path` a `.nix` file sitting on disk → opens `$EDITOR` on that source,
+  rebuilds the attribute `selector` names (or the whole file if `selector`
+  is `.`), grafts the new output up.
+- `path` a bare `.drv` → opens `$EDITOR` on its derivation JSON
+  (`env`/`builder`/`args`), does one real sandboxed rebuild. `selector` is
+  the output to edit when there's more than one (`.` to infer it, which
+  only works if there's exactly one).
+- Anything else → dumps `path`, opens `$EDITOR` on `selector` inside it
+  (`.` for the whole tree), re-adds the edited tree.
 
 ```
-$ graft replace $CONSUMER --override-file $CONSUMER bin/consumer
+$ graft replace $CONSUMER --edit $CONSUMER bin/consumer
 1 explicit replacement, 6 unchanged (7 total)
 /nix/store/v5qzm6...-consumer
 
@@ -81,42 +86,37 @@ $ cat /nix/store/v5qzm6...-consumer/bin/consumer
 patched locally        # whatever you changed in $EDITOR
 ```
 
-**`--override-drv <path> <output>`** — open `$EDITOR` on `<path>`'s
-derivation JSON (`env`/`builder`/`args`), do one real sandboxed rebuild,
-graft the new output up. `<output>` disambiguates which output to edit
-when `<path>` is a bare `.drv` with more than one — pass `.` to infer it
-(works if there's exactly one, or `<path>` is already a specific output):
-
-```
-$ graft replace $MULTI_EXTRA --override-drv $MULTI_EXTRA .
-1 explicit replacement, 6 unchanged (7 total)
-/nix/store/paybdn...-multi-extra
-```
-
-**`--override-nix <file.nix[#attr]>`** — open `$EDITOR` on the actual `.nix`
-source backing a file-based installable, rebuild just that attribute,
-graft the new output up:
-
-```
-$ graft replace $ORIG --override-nix pkg.nix
-1 explicit replacement, 5 unchanged (6 total)
-/nix/store/wm1zq6...-greeter
-
-$ /nix/store/wm1zq6...-greeter/bin/greeter
-hello v2                # whatever "hello v1" became in $EDITOR
-```
-
-Combine them when the two changes are unrelated — one dependency swap and
-one hand-edited file, grafted together instead of two separate runs with
-two out-links to reconcile yourself:
+`--edit` and `--override` may both be repeated and freely combined in a
+single invocation, grafting every result up through the closure together
+in one pass — useful when the two changes are unrelated (one dependency
+swap, one hand-edited file) and you'd rather not reconcile two separate
+runs' out-links yourself:
 
 ```
 graft replace /run/current-system \
   --override nixpkgs#openssl nixpkgs#openssl_3_2 \
-  --override-file "$(readlink -f /etc/foo.conf)" .
+  --edit "$(readlink -f /etc/foo.conf)" .
 ```
 
-(`--override-file`'s `path` needs the real store path, not an `/etc` symlink to it
+## Multi-output packages: `^*`
+
+Both flags understand nix's own `^*` ("all outputs") selector, so a
+multi-output package doesn't need one call per output:
+
+```
+graft replace .#myImage --override "nixpkgs#openssl^*" "nixpkgs#openssl_3_2^*"
+```
+
+Resolves every output of each side and pairs them up by name (`out` with
+`out`, `dev` with `dev`, and so on) — an output present on one side but
+missing on the other is skipped with a warning, not a hard failure.
+
+`--edit <drv>^* .` does the same for editing: one `$EDITOR` session on the
+derivation's JSON still changes the recipe for every output at once, so
+`^*` there just means "give me a pair for each of them" instead of making
+you pick one.
+
+(`--edit`'s `path` needs the real store path, not an `/etc` symlink to it
 — `readlink -f` resolves that, the same way you'd find it to inspect it
 manually.)
 

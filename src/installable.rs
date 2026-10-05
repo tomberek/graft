@@ -24,7 +24,7 @@ pub fn resolve(s: &str, nix_args: &[String]) -> Result<PathBuf> {
         Some((f, a)) => (PathBuf::from(f), Some(a.to_string())),
         None => (direct, None),
     };
-    if is_legacy_file(&file) {
+    if is_legacy_nix_file(&file) {
         log::v(format!("resolving `{s}` as a legacy expression-file installable"));
         let mut args = vec!["-f".to_string(), file.display().to_string()];
         if let Some(a) = attr {
@@ -36,6 +36,9 @@ pub fn resolve(s: &str, nix_args: &[String]) -> Result<PathBuf> {
     derivation::nix_build(&[s.to_string()], nix_args)
 }
 
-fn is_legacy_file(path: &Path) -> bool {
+/// Whether `path` is a `.nix` file sitting on disk — the signal both
+/// `resolve` (legacy `-f file.nix [attr]` installables) and bare
+/// `--override`'s auto-detection (nix-edit) key off of.
+pub fn is_legacy_nix_file(path: &Path) -> bool {
     path.exists() && path.extension().and_then(|e| e.to_str()) == Some("nix")
 }

@@ -196,39 +196,31 @@ impl StrategyArgs {
     }
 }
 
-/// Every transform flag below produces one or more `(old, new)` pairs fed
-/// into the exact same closure walk — they differ only in *how* the pair
-/// is produced, so all four combine freely in a single invocation and
-/// graft together in one pass. Shared by `Replace` and `NixosSystem` since
-/// both end up calling [`collect_pairs`] with these same four fields.
+/// Both flags below produce one or more `(old, new)` pairs fed into the
+/// exact same closure walk — they differ only in *how* the pair is
+/// produced, so they combine freely in a single invocation and graft
+/// together in one pass. Shared by `Replace` and `NixosSystem` since both
+/// end up calling [`collect_pairs`] with these same two fields.
 #[derive(Args)]
 struct TransformArgs {
     /// Override `old` with `new` throughout the closure — the same name
     /// `nix`'s own `--override-input` uses for "swap this specific thing".
     /// `old`/`new` are installables, same forms as `closure-root`. May be
-    /// repeated; may be combined with --override-file/--override-drv/--override-nix.
+    /// repeated; may be combined with --edit.
     #[arg(long = "override", num_args = 2, value_names = ["old", "new"])]
     overrides: Vec<String>,
-    /// Override a file inside an already-built store path by hand-editing
-    /// it, and graft the result up through the closure. `subpath` is
-    /// relative to `path`'s own root; pass `.` for the whole tree. May be
-    /// repeated; may be combined with --override/--override-drv/--override-nix.
-    #[arg(long = "override-file", num_args = 2, value_names = ["path", "subpath"])]
-    override_file: Vec<String>,
-    /// Override a derivation's JSON (env/builder/args) by hand-editing it,
-    /// and rebuild just that node. `output` disambiguates which output to
-    /// edit when `path` is a bare `.drv` with more than one (ignored
-    /// otherwise, since a plain output path is already unambiguous) — pass
-    /// `.` to infer it, which only works if there's exactly one. May be
-    /// repeated; may be combined with --override/--override-file/--override-nix.
-    #[arg(long = "override-drv", num_args = 2, value_names = ["path", "output"])]
-    override_drv: Vec<String>,
-    /// Override the .nix file backing a file-based installable
-    /// (`path/to/file.nix[#attr]`) by hand-editing it, and rebuild just
-    /// that attribute. May be repeated; may be combined with
-    /// --override/--override-file/--override-drv.
-    #[arg(long = "override-nix", value_name = "file.nix[#attr]")]
-    override_nix: Vec<String>,
+    /// Edit `path` by hand and graft the result up through the closure —
+    /// what kind of edit depends entirely on what `path` turns out to be,
+    /// detected automatically: a `.nix` file sitting on disk means editing
+    /// that source and rebuilding the attribute it names; a bare `.drv`
+    /// means editing its derivation JSON (env/builder/args) and rebuilding
+    /// just that node; anything else means editing a file inside its
+    /// already-built output. `selector` means whatever's appropriate for
+    /// that kind — an attribute, an output name, or a subpath — or pass
+    /// `.` when none applies. May be repeated; may be combined with
+    /// --override.
+    #[arg(long = "edit", num_args = 2, value_names = ["path", "selector"])]
+    edit: Vec<String>,
 }
 
 #[derive(Subcommand)]
@@ -274,35 +266,122 @@ enum Cmd {
 
 /// Resolves every transform flag in `transforms` into `(old, new)` pairs
 /// and gathers them into one list — see [`TransformArgs`]'s doc comment
-/// for why this is the one place all four converge. `--override-file`'s
-/// closure membership check is computed at most once, not once per
-/// `--override-file`, since several may be combined in one invocation.
+/// for why this is the one place both converge. The closure membership
+/// check an `--edit` that turns out to be a file-edit needs is computed at
+/// most once, not once per occurrence, since several may be combined in
+/// one invocation.
 fn collect_pairs(closure_root: &Path, nix_args: &[String], transforms: TransformArgs) -> Result<Vec<(PathBuf, PathBuf)>> {
-    let TransformArgs { overrides, override_file, override_drv, override_nix } = transforms;
+    let TransformArgs { overrides, edit } = transforms;
     let mut pairs = Vec::new();
+    let mut closure_cache: Option<Vec<PathBuf>> = None;
     for pair in overrides.chunks(2) {
-        pairs.push((installable::resolve(&pair[0], nix_args)?, installable::resolve(&pair[1], nix_args)?));
+        pairs.extend(resolve_override(&pair[0], &pair[1], nix_args)?);
     }
-    if !override_file.is_empty() {
-        let closure = store::closure(closure_root)?;
-        for pair in override_file.chunks(2) {
-            let path = installable::resolve(&pair[0], nix_args)?;
-            let subpath = if pair[1] == "." { None } else { Some(PathBuf::from(&pair[1])) };
-            pairs.push(edit_file::produce_pair(closure_root, &closure, &path, subpath.as_deref())?);
-        }
-    }
-    for pair in override_drv.chunks(2) {
-        let path = installable::resolve(&pair[0], nix_args)?;
-        let output = if pair[1] == "." { None } else { Some(pair[1].as_str()) };
-        pairs.push(edit_drv::produce_pair(&path, output, nix_args)?);
-    }
-    for installable_str in &override_nix {
-        pairs.push(edit_nix::produce_pair(installable_str, nix_args)?);
+    for pair in edit.chunks(2) {
+        pairs.extend(detect_edit(&pair[0], &pair[1], closure_root, nix_args, &mut closure_cache)?);
     }
     if pairs.is_empty() {
-        bail!("at least one of --override, --override-file, --override-drv, or --override-nix is required");
+        bail!("at least one of --override or --edit is required");
     }
     Ok(pairs)
+}
+
+/// Resolves one `--override <old> <new>` occurrence to one or more pairs.
+/// Ordinarily exactly one, both sides resolved as installables — but
+/// `old`/`new` both ending in `^*` (nix's own "all outputs" selector)
+/// pairs up every output the two installables have in common by name
+/// instead, so replacing a multi-output package doesn't need one
+/// `--override` per output. An output present in `old` but missing from
+/// `new` is skipped with a warning, not a hard failure — nothing in the
+/// closure may ever reference it anyway.
+fn resolve_override(old: &str, new: &str, nix_args: &[String]) -> Result<Vec<(PathBuf, PathBuf)>> {
+    let (old_all, new_all) = (old.ends_with("^*"), new.ends_with("^*"));
+    if old_all != new_all {
+        bail!("--override {old} {new}: either both sides use `^*` (all outputs) or neither does");
+    }
+    if !old_all {
+        return Ok(vec![(installable::resolve(old, nix_args)?, installable::resolve(new, nix_args)?)]);
+    }
+    let old_outputs = derivation::resolve_outputs(old, nix_args)?;
+    let new_outputs = derivation::resolve_outputs(new, nix_args)?;
+    let mut pairs = Vec::new();
+    for (name, old_path) in &old_outputs {
+        match new_outputs.get(name) {
+            Some(new_path) => pairs.push((old_path.clone(), new_path.clone())),
+            None => eprintln!("warning: {new} has no output named `{name}` (present in {old}) — skipping that output"),
+        }
+    }
+    Ok(pairs)
+}
+
+fn ensure_closure<'a>(cache: &'a mut Option<Vec<PathBuf>>, closure_root: &Path) -> Result<&'a [PathBuf]> {
+    if cache.is_none() {
+        *cache = Some(store::closure(closure_root)?);
+    }
+    Ok(cache.as_ref().unwrap())
+}
+
+/// Detects what kind of edit `--edit <path> <selector>` means, mostly from
+/// what `path` itself turns out to be (never ambiguously more than one of
+/// these, so no guessing or backtracking needed) — with one exception
+/// noted below where `selector` breaks a tie:
+/// 0. `path` ends in `^*` (nix's own "all outputs" selector) -> drv-edit,
+///    once, producing a pair for *every* output instead of just one.
+///    `selector` isn't meaningful here (there's no single output or
+///    subpath left to name) and must be `.`.
+/// 1. `path` is a `.nix` file sitting on disk (not a store path) ->
+///    nix-edit, `selector` an attribute (`.` for none).
+/// 2. `path` resolves to a bare `.drv` -> drv-edit, `selector` an output
+///    name (`.` to infer it, which only works if there's exactly one).
+/// 3. `path` resolves to a plain output whose own deriver has an output
+///    literally named `selector`, and `selector` *isn't* also an existing
+///    subpath inside it -> drv-edit anyway, resolving the deriver
+///    automatically (what `--override-drv` used to do for free on a
+///    plain output path). Subpath wins when both would apply.
+/// 4. Otherwise -> file-edit, `selector` a subpath inside the resolved
+///    output (`.` for the whole tree).
+fn detect_edit(
+    path: &str,
+    selector: &str,
+    closure_root: &Path,
+    nix_args: &[String],
+    closure_cache: &mut Option<Vec<PathBuf>>,
+) -> Result<Vec<(PathBuf, PathBuf)>> {
+    if let Some(base) = path.strip_suffix("^*") {
+        if selector != "." {
+            bail!("--edit {path} {selector}: `selector` isn't meaningful with `^*` (all outputs); pass `.`");
+        }
+        let resolved = installable::resolve(base, nix_args)?;
+        return edit_drv::produce_pairs_all_outputs(&resolved, nix_args);
+    }
+
+    if installable::is_legacy_nix_file(Path::new(path)) {
+        let installable = if selector == "." { path.to_string() } else { format!("{path}#{selector}") };
+        return Ok(vec![edit_nix::produce_pair(&installable, nix_args)?]);
+    }
+
+    let resolved = installable::resolve(path, nix_args)?;
+
+    if resolved.extension().and_then(|e| e.to_str()) == Some("drv") {
+        let output = if selector == "." { None } else { Some(selector) };
+        return Ok(vec![edit_drv::produce_pair(&resolved, output, nix_args)?]);
+    }
+
+    // A plain output path never needs `selector` to disambiguate an
+    // output (it's already unambiguous) — but that's exactly the shape
+    // `--override-drv` used to let you edit a derivation via its already-
+    // built output, with no need to look up its `.drv` separately. Keeping
+    // that reachable from one auto-detecting flag means checking, only
+    // when `selector` isn't an existing subpath: does it instead name one
+    // of this path's own deriver's outputs? Subpath wins when both apply,
+    // since it's the more literal reading of "edit this path".
+    if selector != "." && !resolved.join(selector).exists() && derivation::has_output(&resolved, selector) {
+        return Ok(vec![edit_drv::produce_pair(&resolved, Some(selector), nix_args)?]);
+    }
+
+    let closure = ensure_closure(closure_cache, closure_root)?;
+    let subpath = if selector == "." { None } else { Some(Path::new(selector)) };
+    Ok(vec![edit_file::produce_pair(closure_root, closure, &resolved, subpath)?])
 }
 
 fn main() -> Result<()> {

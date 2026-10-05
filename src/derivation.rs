@@ -303,11 +303,12 @@ pub enum OutputTarget<'a> {
     Name(&'a str),
 }
 
-/// Extract the inner derivation object (what `nix derivation add` expects)
-/// plus the resolved output name/path from `nix derivation show`'s wrapper.
-/// `target = None` requires exactly one output; otherwise it's found by
-/// path or by name, regardless of how many other outputs exist.
-pub fn locate_output(shown: &Value, drv_path: &Path, target: Option<OutputTarget>) -> Result<(String, PathBuf, Value)> {
+/// The inner derivation object (what `nix derivation add` expects) out of
+/// `nix derivation show`'s `{"derivations": {"<basename>.drv": {...}}}`
+/// wrapper — shared by [`locate_output`], [`all_outputs`], and callers
+/// (`edit_drv`'s all-outputs mode) that need the raw JSON without going
+/// through either of those.
+pub fn inner_derivation<'a>(shown: &'a Value, drv_path: &Path) -> Result<&'a Value> {
     let derivations = shown
         .get("derivations")
         .with_context(|| format!("unexpected `nix derivation show` schema for {}", drv_path.display()))?;
@@ -318,6 +319,15 @@ pub fn locate_output(shown: &Value, drv_path: &Path, target: Option<OutputTarget
         .iter()
         .next()
         .with_context(|| format!("no derivation found for {}", drv_path.display()))?;
+    Ok(inner)
+}
+
+/// Extract the inner derivation object (what `nix derivation add` expects)
+/// plus the resolved output name/path from `nix derivation show`'s wrapper.
+/// `target = None` requires exactly one output; otherwise it's found by
+/// path or by name, regardless of how many other outputs exist.
+pub fn locate_output(shown: &Value, drv_path: &Path, target: Option<OutputTarget>) -> Result<(String, PathBuf, Value)> {
+    let inner = inner_derivation(shown, drv_path)?;
     let outputs = inner
         .get("outputs")
         .and_then(|o| o.as_object())
@@ -363,6 +373,33 @@ pub fn locate_output(shown: &Value, drv_path: &Path, target: Option<OutputTarget
         }
     };
     Ok((name, full_store_path(&raw_path), inner.clone()))
+}
+
+/// Every one of a derivation's `(name, path)` output pairs — for `^*`
+/// ("all outputs", nix's own convention) support: editing a derivation
+/// changes the recipe for every output at once anyway, so there's no
+/// reason to make the caller pick just one when they asked for all of them.
+pub fn all_outputs(shown: &Value, drv_path: &Path) -> Result<Vec<(String, PathBuf)>> {
+    let inner = inner_derivation(shown, drv_path)?;
+    let outputs = inner.get("outputs").and_then(|o| o.as_object()).context("derivation has no `outputs`")?;
+    outputs
+        .iter()
+        .map(|(name, v)| {
+            let raw = v.get("path").and_then(|p| p.as_str()).context("output has no `path`")?;
+            Ok((name.clone(), full_store_path(raw)))
+        })
+        .collect()
+}
+
+/// Whether `path`'s own deriver has an output literally named `name` —
+/// `false` (not an error) for anything without a deriver, or without that
+/// specific output, so this is safe to use as a plain yes/no probe, e.g.
+/// to detect "edit this path's own derivation" from a selector string
+/// without first committing to that interpretation.
+pub fn has_output(path: &Path, name: &str) -> bool {
+    let Ok(drv) = deriver_of(path) else { return false };
+    let Ok(shown) = show(&drv) else { return false };
+    locate_output(&shown, &drv, Some(OutputTarget::Name(name))).is_ok()
 }
 
 fn output_names(outputs: &serde_json::Map<String, Value>) -> String {
@@ -470,6 +507,36 @@ pub fn build_many(targets: &[(PathBuf, String)], nix_args: &[String]) -> Result<
         }
     }
     Ok(results)
+}
+
+/// Resolves `installable` (expected to end in `^*`, nix's own "all
+/// outputs" selector) to every one of its outputs by name, via `nix build
+/// --json` — the installable-level counterpart to [`all_outputs`], used
+/// for `--override old^* new^*`.
+pub fn resolve_outputs(installable: &str, nix_args: &[String]) -> Result<HashMap<String, PathBuf>> {
+    log::v(format!("running: nix build {installable} --no-link --json"));
+    let output = Command::new("nix")
+        .args(["build", installable, "--no-link", "--json"])
+        .args(nix_args)
+        .output()
+        .with_context(|| format!("failed to run nix build {installable} --json"))?;
+    if !output.status.success() {
+        bail!("nix build {installable} --json failed: {}", String::from_utf8_lossy(&output.stderr));
+    }
+    let parsed: Vec<Value> =
+        serde_json::from_slice(&output.stdout).context("nix build --json did not produce the expected JSON array")?;
+    let entry = parsed.first().with_context(|| format!("nix build {installable} --json produced no results"))?;
+    let outputs = entry
+        .get("outputs")
+        .and_then(Value::as_object)
+        .with_context(|| format!("nix build {installable} --json result missing `outputs`"))?;
+    let mut result = HashMap::new();
+    for (name, path) in outputs {
+        if let Some(path) = path.as_str() {
+            result.insert(name.clone(), PathBuf::from(path));
+        }
+    }
+    Ok(result)
 }
 
 /// Creates (or replaces) a GC-root symlink at `link` pointing at `target`,

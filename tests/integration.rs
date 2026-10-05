@@ -181,12 +181,12 @@ fn edit_file_grafts_a_hand_edited_file_up_through_the_closure() {
     let editor = stub_editor(r#"echo "edited-marker" >> "$1""#, &mut editors);
 
     let output = graft(
-        &["replace", &consumer, "--override-file", &consumer, "bin/consumer"],
+        &["replace", &consumer, "--edit", &consumer, "bin/consumer"],
         Some(&editor),
     );
     assert!(
         output.status.success(),
-        "graft replace --override-file failed: {}",
+        "graft replace --edit failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let grafted = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -202,8 +202,9 @@ fn edit_file_grafts_a_hand_edited_file_up_through_the_closure() {
 #[test]
 fn edit_drv_resolves_a_plain_output_path_to_its_deriver_automatically() {
     let consumer = nix_build("consumer");
-    // Pass the plain output path, not its `.drv` — `edit drv` must resolve
-    // the deriver itself.
+    // Pass the plain output path, not its `.drv`, with its own output
+    // name ("out") as the selector — not a subpath that exists inside it,
+    // so detect_edit falls back to resolving its deriver automatically.
     let mut editors = Vec::new();
     let editor = stub_editor(
         r#"python3 -c "
@@ -217,10 +218,10 @@ json.dump(d, open(path, 'w'))
         &mut editors,
     );
 
-    let output = graft(&["replace", &consumer, "--override-drv", &consumer, "."], Some(&editor));
+    let output = graft(&["replace", &consumer, "--edit", &consumer, "out"], Some(&editor));
     assert!(
         output.status.success(),
-        "graft replace --override-drv failed: {}",
+        "graft replace --edit failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let grafted = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -232,6 +233,38 @@ json.dump(d, open(path, 'w'))
 
     let run_orig = Command::new(format!("{consumer}/bin/consumer")).output().unwrap();
     assert!(!String::from_utf8_lossy(&run_orig.stdout).contains("edited-marker"), "original must be untouched");
+}
+
+#[test]
+fn edit_detects_a_nix_file_on_disk_and_rebuilds_the_attribute() {
+    // A dedicated scratch file, not the shared scenario.nix fixture --
+    // nix-edit opens $EDITOR on the file in place, which would otherwise
+    // permanently mutate a fixture every other test also depends on.
+    let dir = tempfile::tempdir().unwrap();
+    let nix_file = dir.path().join("pkg.nix");
+    fs::write(
+        &nix_file,
+        r#"with import <nixpkgs> {}; writeShellScriptBin "edit-nix-greeter" ''echo "hello v1"''"#,
+    )
+    .unwrap();
+
+    let orig = Command::new("nix-build").args([nix_file.to_str().unwrap(), "--no-out-link"]).output().unwrap();
+    assert!(orig.status.success(), "{}", String::from_utf8_lossy(&orig.stderr));
+    let orig_path = String::from_utf8_lossy(&orig.stdout).trim().to_string();
+
+    let mut editors = Vec::new();
+    let editor = stub_editor(r#"sed -i 's/hello v1/hello v2/' "$1""#, &mut editors);
+
+    let output = graft(&["replace", &orig_path, "--edit", nix_file.to_str().unwrap(), "."], Some(&editor));
+    assert!(output.status.success(), "graft replace --edit (nix-edit detection) failed: {}", String::from_utf8_lossy(&output.stderr));
+    let grafted = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    assert_ne!(grafted, orig_path);
+
+    let run = Command::new(format!("{grafted}/bin/edit-nix-greeter")).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "hello v2");
+
+    let run_orig = Command::new(format!("{orig_path}/bin/edit-nix-greeter")).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&run_orig.stdout).trim(), "hello v1", "original must be untouched");
 }
 
 #[test]
@@ -364,6 +397,78 @@ fn rebuild_supports_a_multi_output_derivation() {
     let inner = parsed["derivations"].as_object().unwrap().values().next().unwrap();
     let outputs: Vec<&str> = inner["outputs"].as_object().unwrap().keys().map(|s| s.as_str()).collect();
     assert!(outputs.contains(&"out") && outputs.contains(&"extra"), "rebuilt derivation should still have both outputs: {outputs:?}");
+}
+
+#[test]
+fn override_all_outputs_pairs_every_output_by_name_in_one_shot() {
+    // multiAllConsumer genuinely references both outputs of multiAllOld
+    // (via symlinks); `old^* new^*` should pair `out` with `out` and
+    // `extra` with `extra` without needing two separate --override calls.
+    let old_drv = {
+        let out = Command::new("nix-instantiate").args([fixture_path().to_str().unwrap(), "-A", "multiAllOld"]).output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    let new_drv = {
+        let out = Command::new("nix-instantiate").args([fixture_path().to_str().unwrap(), "-A", "multiAllNew"]).output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    let consumer = nix_build("multiAllConsumer");
+
+    let output = graft(&["replace", &consumer, "--override", &format!("{old_drv}^*"), &format!("{new_drv}^*")], None);
+    assert!(output.status.success(), "graft replace --override old^* new^* failed: {}", String::from_utf8_lossy(&output.stderr));
+    let grafted = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    assert_ne!(grafted, consumer);
+
+    let out_target = fs::read_link(format!("{grafted}/out-link")).unwrap();
+    let extra_target = fs::read_link(format!("{grafted}/extra-link")).unwrap();
+    assert_eq!(fs::read_to_string(out_target.join("data")).unwrap().trim(), "out v2", "the `out` output should have been paired and replaced");
+    assert_eq!(fs::read_to_string(extra_target.join("data")).unwrap().trim(), "extra v2", "the `extra` output should have been paired and replaced too");
+}
+
+#[test]
+fn edit_all_outputs_rebuilds_every_output_from_one_edit_session() {
+    // multiOut produces `out` (unrelated to any dependency) and `extra`
+    // (depends on multiDep); `--edit <drv>^* .` should edit the recipe
+    // once and still produce correctly rebuilt pairs for both outputs.
+    let out_path = nix_build("multiOut");
+    let drv = {
+        let out = Command::new("nix-store").args(["-q", "--deriver", &out_path]).output().unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+
+    let mut editors = Vec::new();
+    let editor = stub_editor(
+        r#"python3 -c "
+import json, sys
+path = sys.argv[1]
+d = json.load(open(path))
+d['env']['buildCommand'] += '\necho edited-all-outputs >> \$extra/marker\n'
+json.dump(d, open(path, 'w'))
+" "$1""#,
+        &mut editors,
+    );
+
+    let output = graft(&["-v", "replace", &out_path, "--edit", &format!("{drv}^*"), "."], Some(&editor));
+    assert!(output.status.success(), "graft replace --edit drv^* failed: {}", String::from_utf8_lossy(&output.stderr));
+    let grafted = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    assert_ne!(grafted, out_path);
+
+    let marker = fs::read_to_string(format!("{grafted}/marker")).unwrap_or_default();
+    assert!(marker.is_empty(), "`out` itself wasn't touched by the edit, just rebuilt alongside `extra`: {marker}");
+
+    // `out` and `extra` are independent sibling outputs with no reference
+    // between them, so the only way to find the rebuilt `extra` path (to
+    // check *it* changed too) is the `-v` log line reporting it directly.
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let new_extra = stderr
+        .lines()
+        .find_map(|l| l.strip_prefix("[graft] rebuilt leaf (extra): ")?.split_once(" -> "))
+        .map(|(_, new)| new.to_string())
+        .unwrap_or_else(|| panic!("expected a 'rebuilt leaf (extra): ...' log line: {stderr}"));
+    let extra_marker = fs::read_to_string(format!("{new_extra}/marker")).unwrap();
+    assert!(extra_marker.contains("edited-all-outputs"), "extra output should show the editor's marker: {extra_marker}");
 }
 
 #[test]
@@ -922,10 +1027,10 @@ fn replace_grafts_two_independent_nodes_at_the_same_level_in_parallel() {
 
 #[test]
 fn replace_and_edit_combine_in_one_invocation_against_independent_nodes() {
-    // --override and --override-file used to be mutually exclusive subcommands; now
+    // --override and --edit used to be mutually exclusive subcommands; now
     // they're flags on the same command, so one branch of the closure can
     // be changed via --override while a completely independent branch is
-    // changed via --override-file, both grafted up through parallelTop in one pass.
+    // changed via --edit, both grafted up through parallelTop in one pass.
     let a = nix_build("parLeafA");
     let a2 = nix_build("parLeafAV2");
     let mid_b = nix_build("parMidB");
@@ -935,12 +1040,12 @@ fn replace_and_edit_combine_in_one_invocation_against_independent_nodes() {
     let editor = stub_editor(r#"echo "echo edited-marker" >> "$1""#, &mut editors);
 
     let output = graft(
-        &["replace", &top, "--override", &a, &a2, "--override-file", &mid_b, "bin/mid-b"],
+        &["replace", &top, "--override", &a, &a2, "--edit", &mid_b, "bin/mid-b"],
         Some(&editor),
     );
     assert!(
         output.status.success(),
-        "combined --override/--override-file failed: {}",
+        "combined --override/--edit failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let grafted = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -949,7 +1054,7 @@ fn replace_and_edit_combine_in_one_invocation_against_independent_nodes() {
     let run = Command::new(format!("{grafted}/bin/parallel-top")).output().expect("failed to run grafted parallel-top");
     let stdout = String::from_utf8_lossy(&run.stdout);
     assert!(stdout.contains("a v2"), "the --override side should have propagated: {stdout}");
-    assert!(stdout.contains("edited-marker"), "the --override-file side should have propagated too: {stdout}");
+    assert!(stdout.contains("edited-marker"), "the --edit side should have propagated too: {stdout}");
     assert!(stdout.contains("b v1"), "leaf-b itself was never touched by either transform: {stdout}");
 
     let run_orig = Command::new(format!("{top}/bin/parallel-top")).output().unwrap();

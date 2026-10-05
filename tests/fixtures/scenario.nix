@@ -191,4 +191,24 @@ let pkgs = import <nixpkgs> {}; in rec {
     EOF
     chmod +x $out/bin/run
   '';
+
+  # Two versions of a multi-output derivation, both outputs genuinely
+  # referenced (via symlinks, so Nix's reference scanner picks them up) by
+  # multiAllConsumer — exercises `--override old^* new^*` pairing every
+  # output by name in one shot, instead of one `--override` per output.
+  multiAllOld = pkgs.runCommand "multi-all" { outputs = [ "out" "extra" ]; } ''
+    mkdir -p $out $extra
+    echo "out v1" > $out/data
+    echo "extra v1" > $extra/data
+  '';
+  multiAllNew = pkgs.runCommand "multi-all" { outputs = [ "out" "extra" ]; } ''
+    mkdir -p $out $extra
+    echo "out v2" > $out/data
+    echo "extra v2" > $extra/data
+  '';
+  multiAllConsumer = pkgs.runCommand "multi-all-consumer" { } ''
+    mkdir -p $out
+    ln -s ${multiAllOld} $out/out-link
+    ln -s ${multiAllOld.extra} $out/extra-link
+  '';
 }

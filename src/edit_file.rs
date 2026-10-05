@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 /// tree as a fresh content-addressed store path, and return the
 /// `(old, new)` pair. Grafting it up through the closure is the caller's
 /// job (`main.rs`'s `collect_pairs`) — several of these, and/or
-/// `--override`/`--override-drv`/`--override-nix`, can be combined into one closure
+/// `--override`/`--edit`, can be combined into one closure
 /// walk, so producing the pair is kept separate from applying it.
 pub fn produce_pair(closure_root: &Path, closure: &[PathBuf], path: &Path, subpath: Option<&Path>) -> Result<(PathBuf, PathBuf)> {
     store::require_output_path(path)?;
