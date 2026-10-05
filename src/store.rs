@@ -29,7 +29,9 @@ pub fn require_output_path(path: &Path) -> Result<()> {
 /// `./abc`) would otherwise never match. Also doubles as an existence check.
 pub fn canonicalize(path: &Path) -> Result<PathBuf> {
     std::fs::canonicalize(path).with_context(|| {
-        let cwd = std::env::current_dir().map(|d| d.display().to_string()).unwrap_or_else(|_| "?".into());
+        let cwd = std::env::current_dir()
+            .map(|d| d.display().to_string())
+            .unwrap_or_else(|_| "?".into());
         format!(
             "failed to resolve {} (relative to current directory {cwd}) — check that it exists, \
              that you're in the right directory if it's a relative path, and that it isn't a \
@@ -110,7 +112,12 @@ pub fn references(path: &Path) -> Result<Vec<PathBuf>> {
     let refs = entry
         .get("references")
         .and_then(|r| r.as_array())
-        .with_context(|| format!("nix path-info --json entry for {} has no references array", path.display()))?;
+        .with_context(|| {
+            format!(
+                "nix path-info --json entry for {} has no references array",
+                path.display()
+            )
+        })?;
     Ok(refs
         .iter()
         .filter_map(|v| v.as_str())
@@ -155,7 +162,11 @@ pub fn dump(path: &Path) -> Result<Vec<u8>> {
 /// non-store directory.
 pub fn restore(nar: &[u8], target: &Path) -> Result<()> {
     use std::io::Write;
-    log::v(format!("running: nix-store --restore {} ({} NAR bytes)", target.display(), nar.len()));
+    log::v(format!(
+        "running: nix-store --restore {} ({} NAR bytes)",
+        target.display(),
+        nar.len()
+    ));
     let mut child = Command::new("nix-store")
         .arg("--restore")
         .arg(target)
@@ -181,7 +192,15 @@ pub fn restore(nar: &[u8], target: &Path) -> Result<()> {
 pub fn add_fixed_recursive(dir: &Path) -> Result<PathBuf> {
     let out = run(
         "nix",
-        &["store", "add", "--mode", "nar", "--hash-algo", "sha256", path_str(dir)?],
+        &[
+            "store",
+            "add",
+            "--mode",
+            "nar",
+            "--hash-algo",
+            "sha256",
+            path_str(dir)?,
+        ],
     )?;
     let line = out
         .lines()

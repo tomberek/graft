@@ -8,7 +8,11 @@ use std::process::Command;
 /// `nix-diff` always exits 0 regardless of whether the two derivations
 /// differ, unlike `diffoscope`'s exit-code convention below.
 pub fn nix_diff(old_deriver: &Path, new_deriver: &Path) -> Result<String> {
-    log::v(format!("running: nix-diff {} {} --color never", old_deriver.display(), new_deriver.display()));
+    log::v(format!(
+        "running: nix-diff {} {} --color never",
+        old_deriver.display(),
+        new_deriver.display()
+    ));
     let output = Command::new("nix-diff")
         .args(["--color", "never"])
         .arg(old_deriver)
@@ -38,7 +42,12 @@ pub fn nix_diff(old_deriver: &Path, new_deriver: &Path) -> Result<String> {
 /// `1`. So `Some(1)` only counts as success if `out_html` was actually
 /// written; a crash before it could do that still surfaces as an error.
 pub fn diffoscope_html(old: &Path, new: &Path, out_html: &Path) -> Result<()> {
-    log::v(format!("running: diffoscope --html {} {} {}", out_html.display(), old.display(), new.display()));
+    log::v(format!(
+        "running: diffoscope --html {} {} {}",
+        out_html.display(),
+        old.display(),
+        new.display()
+    ));
     let output = Command::new("diffoscope")
         .arg("--html")
         .arg(out_html)

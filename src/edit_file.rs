@@ -9,10 +9,19 @@ use std::path::{Path, PathBuf};
 /// job (`main.rs`'s `collect_pairs`) — several of these, and/or
 /// `--override`/`--edit`, can be combined into one closure
 /// walk, so producing the pair is kept separate from applying it.
-pub fn produce_pair(closure_root: &Path, closure: &[PathBuf], path: &Path, subpath: Option<&Path>) -> Result<(PathBuf, PathBuf)> {
+pub fn produce_pair(
+    closure_root: &Path,
+    closure: &[PathBuf],
+    path: &Path,
+    subpath: Option<&Path>,
+) -> Result<(PathBuf, PathBuf)> {
     store::require_output_path(path)?;
     if !closure.iter().any(|p| p == path) {
-        bail!("{} is not in the closure of {}", path.display(), closure_root.display());
+        bail!(
+            "{} is not in the closure of {}",
+            path.display(),
+            closure_root.display()
+        );
     }
 
     let name = store::store_name(path)?;
@@ -39,6 +48,10 @@ pub fn produce_pair(closure_root: &Path, closure: &[PathBuf], path: &Path, subpa
 
     log::v(format!("re-adding {} to the store", extracted.display()));
     let new_path = store::add_fixed_recursive(&extracted)?;
-    log::v(format!("edited path: {} -> {}", path.display(), new_path.display()));
+    log::v(format!(
+        "edited path: {} -> {}",
+        path.display(),
+        new_path.display()
+    ));
     Ok((path.to_path_buf(), new_path))
 }

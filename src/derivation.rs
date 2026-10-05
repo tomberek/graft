@@ -34,7 +34,13 @@ pub fn tool_path(name: &str) -> Result<PathBuf> {
 pub fn current_system() -> Result<String> {
     log::v("running: nix eval --impure --raw --expr builtins.currentSystem");
     let out = Command::new("nix")
-        .args(["eval", "--impure", "--raw", "--expr", "builtins.currentSystem"])
+        .args([
+            "eval",
+            "--impure",
+            "--raw",
+            "--expr",
+            "builtins.currentSystem",
+        ])
         .output()
         .context("failed to run `nix eval` for builtins.currentSystem")?;
     if !out.status.success() {
@@ -115,7 +121,9 @@ pub fn add_with_retry(mut inner: Value) -> Result<PathBuf> {
                     log::v(format!("self-correcting: {}", corr.describe()));
                     apply_correction(&mut inner, &corr)?;
                 }
-                None => bail!("nix derivation add failed and the error was not auto-correctable:\n{stderr}"),
+                None => bail!(
+                    "nix derivation add failed and the error was not auto-correctable:\n{stderr}"
+                ),
             },
         }
     }
@@ -134,7 +142,11 @@ fn try_add(inner: &Value) -> Result<PathBuf, String> {
         .stdin
         .take()
         .expect("piped stdin")
-        .write_all(serde_json::to_string(inner).map_err(|e| e.to_string())?.as_bytes())
+        .write_all(
+            serde_json::to_string(inner)
+                .map_err(|e| e.to_string())?
+                .as_bytes(),
+        )
         .map_err(|e| e.to_string())?;
     let output = child.wait_with_output().map_err(|e| e.to_string())?;
     if output.status.success() {
@@ -156,7 +168,9 @@ enum Correction {
 impl Correction {
     fn describe(&self) -> String {
         match self {
-            Correction::Output { incorrect, correct } => format!("output path {incorrect} -> {correct}"),
+            Correction::Output { incorrect, correct } => {
+                format!("output path {incorrect} -> {correct}")
+            }
             Correction::EnvVar { name, correct } => format!("env.{name} -> {correct}"),
         }
     }
@@ -246,12 +260,20 @@ fn basename_of(raw: &str) -> &str {
 /// `path` has no known deriver (content directly `nix store add`ed, or a
 /// previous graft) — there's no build recipe to rebuild in that case.
 pub fn deriver_of(path: &Path) -> Result<PathBuf> {
-    log::v(format!("running: nix path-info --derivation {}", path.display()));
+    log::v(format!(
+        "running: nix path-info --derivation {}",
+        path.display()
+    ));
     let output = Command::new("nix")
         .args(["path-info", "--derivation"])
         .arg(path)
         .output()
-        .with_context(|| format!("failed to run nix path-info --derivation {}", path.display()))?;
+        .with_context(|| {
+            format!(
+                "failed to run nix path-info --derivation {}",
+                path.display()
+            )
+        })?;
     if !output.status.success() {
         bail!(
             "{} has no known deriver, so there's no build recipe to rebuild — \
@@ -278,7 +300,10 @@ pub fn resolve_deriver(path: &Path) -> Result<PathBuf> {
 /// `nix derivation show <drv>`, which wraps its result as
 /// `{"derivations": {"<basename>.drv": {...}}}`.
 pub fn show(drv_path: &Path) -> Result<Value> {
-    log::v(format!("running: nix derivation show {}", drv_path.display()));
+    log::v(format!(
+        "running: nix derivation show {}",
+        drv_path.display()
+    ));
     let output = Command::new("nix")
         .args(["derivation", "show"])
         .arg(drv_path)
@@ -291,8 +316,12 @@ pub fn show(drv_path: &Path) -> Result<Value> {
             String::from_utf8_lossy(&output.stderr)
         );
     }
-    serde_json::from_slice(&output.stdout)
-        .with_context(|| format!("nix derivation show {} did not produce valid JSON", drv_path.display()))
+    serde_json::from_slice(&output.stdout).with_context(|| {
+        format!(
+            "nix derivation show {} did not produce valid JSON",
+            drv_path.display()
+        )
+    })
 }
 
 /// Which output of a (possibly multi-output) derivation to locate.
@@ -309,9 +338,12 @@ pub enum OutputTarget<'a> {
 /// (`edit_drv`'s all-outputs mode) that need the raw JSON without going
 /// through either of those.
 pub fn inner_derivation<'a>(shown: &'a Value, drv_path: &Path) -> Result<&'a Value> {
-    let derivations = shown
-        .get("derivations")
-        .with_context(|| format!("unexpected `nix derivation show` schema for {}", drv_path.display()))?;
+    let derivations = shown.get("derivations").with_context(|| {
+        format!(
+            "unexpected `nix derivation show` schema for {}",
+            drv_path.display()
+        )
+    })?;
     let obj = derivations
         .as_object()
         .context("`derivations` field is not an object")?;
@@ -326,7 +358,11 @@ pub fn inner_derivation<'a>(shown: &'a Value, drv_path: &Path) -> Result<&'a Val
 /// plus the resolved output name/path from `nix derivation show`'s wrapper.
 /// `target = None` requires exactly one output; otherwise it's found by
 /// path or by name, regardless of how many other outputs exist.
-pub fn locate_output(shown: &Value, drv_path: &Path, target: Option<OutputTarget>) -> Result<(String, PathBuf, Value)> {
+pub fn locate_output(
+    shown: &Value,
+    drv_path: &Path,
+    target: Option<OutputTarget>,
+) -> Result<(String, PathBuf, Value)> {
     let inner = inner_derivation(shown, drv_path)?;
     let outputs = inner
         .get("outputs")
@@ -352,10 +388,17 @@ pub fn locate_output(shown: &Value, drv_path: &Path, target: Option<OutputTarget
                 })?
         }
         Some(OutputTarget::Name(n)) => {
-            let v = outputs
-                .get(n)
-                .with_context(|| format!("{} has no output named `{n}` (its outputs: {})", drv_path.display(), output_names(outputs)))?;
-            let raw = v.get("path").and_then(|p| p.as_str()).context("output has no `path`")?;
+            let v = outputs.get(n).with_context(|| {
+                format!(
+                    "{} has no output named `{n}` (its outputs: {})",
+                    drv_path.display(),
+                    output_names(outputs)
+                )
+            })?;
+            let raw = v
+                .get("path")
+                .and_then(|p| p.as_str())
+                .context("output has no `path`")?;
             (n.to_string(), raw.to_string())
         }
         None => {
@@ -368,7 +411,10 @@ pub fn locate_output(shown: &Value, drv_path: &Path, target: Option<OutputTarget
                 );
             }
             let (name, v) = outputs.iter().next().unwrap();
-            let raw = v.get("path").and_then(|p| p.as_str()).context("output has no `path`")?;
+            let raw = v
+                .get("path")
+                .and_then(|p| p.as_str())
+                .context("output has no `path`")?;
             (name.clone(), raw.to_string())
         }
     };
@@ -381,11 +427,17 @@ pub fn locate_output(shown: &Value, drv_path: &Path, target: Option<OutputTarget
 /// reason to make the caller pick just one when they asked for all of them.
 pub fn all_outputs(shown: &Value, drv_path: &Path) -> Result<Vec<(String, PathBuf)>> {
     let inner = inner_derivation(shown, drv_path)?;
-    let outputs = inner.get("outputs").and_then(|o| o.as_object()).context("derivation has no `outputs`")?;
+    let outputs = inner
+        .get("outputs")
+        .and_then(|o| o.as_object())
+        .context("derivation has no `outputs`")?;
     outputs
         .iter()
         .map(|(name, v)| {
-            let raw = v.get("path").and_then(|p| p.as_str()).context("output has no `path`")?;
+            let raw = v
+                .get("path")
+                .and_then(|p| p.as_str())
+                .context("output has no `path`")?;
             Ok((name.clone(), full_store_path(raw)))
         })
         .collect()
@@ -397,7 +449,9 @@ pub fn all_outputs(shown: &Value, drv_path: &Path) -> Result<Vec<(String, PathBu
 /// to detect "edit this path's own derivation" from a selector string
 /// without first committing to that interpretation.
 pub fn has_output(path: &Path, name: &str) -> bool {
-    let Ok(drv) = deriver_of(path) else { return false };
+    let Ok(drv) = deriver_of(path) else {
+        return false;
+    };
     let Ok(shown) = show(&drv) else { return false };
     locate_output(&shown, &drv, Some(OutputTarget::Name(name))).is_ok()
 }
@@ -432,7 +486,11 @@ pub fn nix_build(build_args: &[String], nix_args: &[String]) -> Result<PathBuf> 
     log::v(format!(
         "running: nix {}{}",
         args.join(" "),
-        if nix_args.is_empty() { String::new() } else { format!(" {}", nix_args.join(" ")) }
+        if nix_args.is_empty() {
+            String::new()
+        } else {
+            format!(" {}", nix_args.join(" "))
+        }
     ));
     // Inherit stderr so build logs stream live; only --print-out-paths's
     // stdout (the result) needs capturing.
@@ -450,7 +508,9 @@ pub fn nix_build(build_args: &[String], nix_args: &[String]) -> Result<PathBuf> 
         .expect("piped stdout")
         .read_to_string(&mut stdout)
         .with_context(|| format!("failed to read output of nix {}", args.join(" ")))?;
-    let status = child.wait().with_context(|| format!("nix {} did not exit", args.join(" ")))?;
+    let status = child
+        .wait()
+        .with_context(|| format!("nix {} did not exit", args.join(" ")))?;
     if !status.success() {
         bail!("nix {} failed (see build output above)", args.join(" "));
     }
@@ -468,15 +528,25 @@ pub fn nix_build(build_args: &[String], nix_args: &[String]) -> Result<PathBuf> 
 /// `--max-jobs`/`--cores`, forwarded via `nix_args` like everything else)
 /// bound real concurrency, the same way it already does for an ordinary
 /// multi-package `nix build`.
-pub fn build_many(targets: &[(PathBuf, String)], nix_args: &[String]) -> Result<HashMap<(PathBuf, String), PathBuf>> {
+pub fn build_many(
+    targets: &[(PathBuf, String)],
+    nix_args: &[String],
+) -> Result<HashMap<(PathBuf, String), PathBuf>> {
     if targets.is_empty() {
         return Ok(HashMap::new());
     }
-    let installables: Vec<String> = targets.iter().map(|(drv, output)| format!("{}^{output}", drv.display())).collect();
+    let installables: Vec<String> = targets
+        .iter()
+        .map(|(drv, output)| format!("{}^{output}", drv.display()))
+        .collect();
     log::v(format!(
         "running: nix build {} --no-link --json{}",
         installables.join(" "),
-        if nix_args.is_empty() { String::new() } else { format!(" {}", nix_args.join(" ")) }
+        if nix_args.is_empty() {
+            String::new()
+        } else {
+            format!(" {}", nix_args.join(" "))
+        }
     ));
     let mut child = Command::new("nix")
         .arg("build")
@@ -488,18 +558,35 @@ pub fn build_many(targets: &[(PathBuf, String)], nix_args: &[String]) -> Result<
         .spawn()
         .context("failed to spawn nix build")?;
     let mut stdout = String::new();
-    child.stdout.take().expect("piped stdout").read_to_string(&mut stdout).context("failed to read nix build --json output")?;
+    child
+        .stdout
+        .take()
+        .expect("piped stdout")
+        .read_to_string(&mut stdout)
+        .context("failed to read nix build --json output")?;
     let status = child.wait().context("nix build did not exit")?;
     if !status.success() {
-        bail!("nix build {} failed (see build output above)", installables.join(" "));
+        bail!(
+            "nix build {} failed (see build output above)",
+            installables.join(" ")
+        );
     }
 
     // Schema: `[{"drvPath": "...", "outputs": {"<name>": "<path>", ...}}, ...]`.
-    let parsed: Vec<Value> = serde_json::from_str(&stdout).context("nix build --json did not produce the expected JSON array")?;
+    let parsed: Vec<Value> = serde_json::from_str(&stdout)
+        .context("nix build --json did not produce the expected JSON array")?;
     let mut results = HashMap::new();
     for entry in parsed {
-        let drv_path = PathBuf::from(entry.get("drvPath").and_then(Value::as_str).context("build result missing `drvPath`")?);
-        let outputs = entry.get("outputs").and_then(Value::as_object).context("build result missing `outputs`")?;
+        let drv_path = PathBuf::from(
+            entry
+                .get("drvPath")
+                .and_then(Value::as_str)
+                .context("build result missing `drvPath`")?,
+        );
+        let outputs = entry
+            .get("outputs")
+            .and_then(Value::as_object)
+            .context("build result missing `outputs`")?;
         for (name, path) in outputs {
             if let Some(path) = path.as_str() {
                 results.insert((drv_path.clone(), name.clone()), PathBuf::from(path));
@@ -521,11 +608,16 @@ pub fn resolve_outputs(installable: &str, nix_args: &[String]) -> Result<HashMap
         .output()
         .with_context(|| format!("failed to run nix build {installable} --json"))?;
     if !output.status.success() {
-        bail!("nix build {installable} --json failed: {}", String::from_utf8_lossy(&output.stderr));
+        bail!(
+            "nix build {installable} --json failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
-    let parsed: Vec<Value> =
-        serde_json::from_slice(&output.stdout).context("nix build --json did not produce the expected JSON array")?;
-    let entry = parsed.first().with_context(|| format!("nix build {installable} --json produced no results"))?;
+    let parsed: Vec<Value> = serde_json::from_slice(&output.stdout)
+        .context("nix build --json did not produce the expected JSON array")?;
+    let entry = parsed
+        .first()
+        .with_context(|| format!("nix build {installable} --json produced no results"))?;
     let outputs = entry
         .get("outputs")
         .and_then(Value::as_object)
@@ -545,14 +637,33 @@ pub fn resolve_outputs(installable: &str, nix_args: &[String]) -> Result<HashMap
 /// Every build this tool does otherwise passes `--no-link`, so without this
 /// nothing produced here is protected from a concurrent garbage collection.
 pub fn add_out_link(target: &Path, link: &Path, nix_args: &[String]) -> Result<()> {
-    log::v(format!("running: nix build {} --out-link {}", target.display(), link.display()));
+    log::v(format!(
+        "running: nix build {} --out-link {}",
+        target.display(),
+        link.display()
+    ));
     let status = Command::new("nix")
-        .args(["build", &target.display().to_string(), "--out-link", &link.display().to_string()])
+        .args([
+            "build",
+            &target.display().to_string(),
+            "--out-link",
+            &link.display().to_string(),
+        ])
         .args(nix_args)
         .status()
-        .with_context(|| format!("failed to spawn nix build {} --out-link {}", target.display(), link.display()))?;
+        .with_context(|| {
+            format!(
+                "failed to spawn nix build {} --out-link {}",
+                target.display(),
+                link.display()
+            )
+        })?;
     if !status.success() {
-        bail!("nix build {} --out-link {} failed", target.display(), link.display());
+        bail!(
+            "nix build {} --out-link {} failed",
+            target.display(),
+            link.display()
+        );
     }
     Ok(())
 }

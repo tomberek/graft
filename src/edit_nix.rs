@@ -13,14 +13,25 @@ use std::process::Command;
 pub fn produce_pair(installable: &str, nix_args: &[String]) -> Result<(PathBuf, PathBuf)> {
     let (file, attr) = parse_installable(installable);
     if !file.exists() {
-        bail!("`--edit` only supports file-based installables; could not find `{}` on disk", file.display());
+        bail!(
+            "`--edit` only supports file-based installables; could not find `{}` on disk",
+            file.display()
+        );
     }
     let old = current_output(&file, attr.as_deref())?;
-    log::v(format!("current output of {}: {}", installable, old.display()));
+    log::v(format!(
+        "current output of {}: {}",
+        installable,
+        old.display()
+    ));
     log::v(format!("opening $EDITOR on {}", file.display()));
     editor::edit(&file)?;
     let new = build(&file, attr.as_deref(), nix_args)?;
-    log::v(format!("rebuilt attribute: {} -> {}", old.display(), new.display()));
+    log::v(format!(
+        "rebuilt attribute: {} -> {}",
+        old.display(),
+        new.display()
+    ));
     Ok((old, new))
 }
 

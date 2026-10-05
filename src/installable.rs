@@ -25,14 +25,18 @@ pub fn resolve(s: &str, nix_args: &[String]) -> Result<PathBuf> {
         None => (direct, None),
     };
     if is_legacy_nix_file(&file) {
-        log::v(format!("resolving `{s}` as a legacy expression-file installable"));
+        log::v(format!(
+            "resolving `{s}` as a legacy expression-file installable"
+        ));
         let mut args = vec!["-f".to_string(), file.display().to_string()];
         if let Some(a) = attr {
             args.push(a);
         }
         return derivation::nix_build(&args, nix_args);
     }
-    log::v(format!("resolving `{s}` as a flake reference / store path / .drv path"));
+    log::v(format!(
+        "resolving `{s}` as a flake reference / store path / .drv path"
+    ));
     derivation::nix_build(&[s.to_string()], nix_args)
 }
 

@@ -77,7 +77,11 @@ pub struct ReplaceOptions<'a> {
 /// `replacements`/`opts.cutoffs`/`opts.force_rebuild`: an explicit
 /// `--override` target wins over a cutoff, which wins over the default
 /// strategy — the same order nixpkgs documents for its own equivalent.
-pub fn replace(closure_root: &Path, replacements: &[(PathBuf, PathBuf)], opts: &ReplaceOptions) -> Result<ReplaceResult> {
+pub fn replace(
+    closure_root: &Path,
+    replacements: &[(PathBuf, PathBuf)],
+    opts: &ReplaceOptions,
+) -> Result<ReplaceResult> {
     if opts.report_diff && opts.report.is_none() {
         bail!("--report-diff has no effect without --report <dir>");
     }
@@ -114,22 +118,43 @@ pub fn replace(closure_root: &Path, replacements: &[(PathBuf, PathBuf)], opts: &
         .iter()
         .map(|(old, new)| Ok((store::canonicalize(old)?, store::canonicalize(new)?)))
         .collect::<Result<_>>()?;
-    let mut cutoffs: HashSet<PathBuf> = opts.cutoffs.iter().map(|p| store::canonicalize(p)).collect::<Result<_>>()?;
-    let mut force_rebuild: HashSet<PathBuf> =
-        opts.force_rebuild.iter().map(|p| store::canonicalize(p)).collect::<Result<_>>()?;
-    let mut force_graft: HashSet<PathBuf> = opts.force_graft.iter().map(|p| store::canonicalize(p)).collect::<Result<_>>()?;
+    let mut cutoffs: HashSet<PathBuf> = opts
+        .cutoffs
+        .iter()
+        .map(|p| store::canonicalize(p))
+        .collect::<Result<_>>()?;
+    let mut force_rebuild: HashSet<PathBuf> = opts
+        .force_rebuild
+        .iter()
+        .map(|p| store::canonicalize(p))
+        .collect::<Result<_>>()?;
+    let mut force_graft: HashSet<PathBuf> = opts
+        .force_graft
+        .iter()
+        .map(|p| store::canonicalize(p))
+        .collect::<Result<_>>()?;
 
     for (old, new) in &replacements {
-        log::v(format!("replacement requested: {} -> {}", old.display(), new.display()));
+        log::v(format!(
+            "replacement requested: {} -> {}",
+            old.display(),
+            new.display()
+        ));
     }
     for p in &cutoffs {
         log::v(format!("cutoff: {} will never be touched", p.display()));
     }
     for p in &force_rebuild {
-        log::v(format!("force-rebuild: {} will use --rebuild strategy if it changes", p.display()));
+        log::v(format!(
+            "force-rebuild: {} will use --rebuild strategy if it changes",
+            p.display()
+        ));
     }
     for p in &force_graft {
-        log::v(format!("force-graft: {} will use graft strategy if it changes", p.display()));
+        log::v(format!(
+            "force-graft: {} will use graft strategy if it changes",
+            p.display()
+        ));
     }
     let explicit: HashMap<PathBuf, PathBuf> = replacements.into_iter().collect();
     let closure_paths = store::closure(closure_root)?;
@@ -152,7 +177,14 @@ pub fn replace(closure_root: &Path, replacements: &[(PathBuf, PathBuf)], opts: &
     }
 
     if opts.interactive {
-        interactive_select(&closure_paths, &explicit, opts.full_rebuild, &mut cutoffs, &mut force_rebuild, &mut force_graft)?;
+        interactive_select(
+            &closure_paths,
+            &explicit,
+            opts.full_rebuild,
+            &mut cutoffs,
+            &mut force_rebuild,
+            &mut force_graft,
+        )?;
     }
 
     let ctx = Ctx {
@@ -174,7 +206,11 @@ pub fn replace(closure_root: &Path, replacements: &[(PathBuf, PathBuf)], opts: &
         for p in &closure_paths {
             match &nodes[p].category {
                 Category::Explicit(new) => {
-                    eprintln!("[dry-run] {} is an explicit replacement target -> {}", p.display(), new.display());
+                    eprintln!(
+                        "[dry-run] {} is an explicit replacement target -> {}",
+                        p.display(),
+                        new.display()
+                    );
                 }
                 Category::Cutoff | Category::Unchanged => {}
                 Category::NeedsGraft => eprintln!("[dry-run] would graft {}", p.display()),
@@ -186,7 +222,9 @@ pub fn replace(closure_root: &Path, replacements: &[(PathBuf, PathBuf)], opts: &
         }
         eprintln!("[dry-run] {}", tally.summarize());
         write_report_if_requested(opts, closure_root, closure_root, &nodes, None, &tally)?;
-        return Ok(ReplaceResult { new_root: closure_root.to_path_buf() });
+        return Ok(ReplaceResult {
+            new_root: closure_root.to_path_buf(),
+        });
     }
 
     // Seed every path that needs no build; bucket the rest by dependency
@@ -212,7 +250,10 @@ pub fn replace(closure_root: &Path, replacements: &[(PathBuf, PathBuf)], opts: &
         // Phase 1: construct every recipe in parallel — cheap (`nix
         // derivation add`, no building), but still worth spreading across
         // threads since each one is a handful of subprocess round-trips.
-        log::v(format!("level {level}: constructing {} recipe(s) in parallel", paths.len()));
+        log::v(format!(
+            "level {level}: constructing {} recipe(s) in parallel",
+            paths.len()
+        ));
         let recipes: Vec<(PathBuf, Result<(PathBuf, String)>)> = std::thread::scope(|scope| {
             let handles: Vec<_> = paths
                 .iter()
@@ -226,7 +267,13 @@ pub fn replace(closure_root: &Path, replacements: &[(PathBuf, PathBuf)], opts: &
                     })
                 })
                 .collect();
-            handles.into_iter().map(|h| h.join().expect("recipe-construction worker thread panicked")).collect()
+            handles
+                .into_iter()
+                .map(|h| {
+                    h.join()
+                        .expect("recipe-construction worker thread panicked")
+                })
+                .collect()
         });
 
         // Phase 2: one `nix build` call for the whole level. Bails on the
@@ -236,23 +283,41 @@ pub fn replace(closure_root: &Path, replacements: &[(PathBuf, PathBuf)], opts: &
         let mut targets = Vec::with_capacity(recipes.len());
         let mut recipe_of: HashMap<PathBuf, (PathBuf, String)> = HashMap::new();
         for (path, outcome) in recipes {
-            let verb = if matches!(nodes[&path].category, Category::NeedsRebuild) { "rebuilding" } else { "grafting" };
+            let verb = if matches!(nodes[&path].category, Category::NeedsRebuild) {
+                "rebuilding"
+            } else {
+                "grafting"
+            };
             let recipe = outcome.with_context(|| format!("while {verb} {}", path.display()))?;
             targets.push(recipe.clone());
             recipe_of.insert(path, recipe);
         }
-        log::v(format!("level {level}: building {} target(s) in one nix build call", targets.len()));
+        log::v(format!(
+            "level {level}: building {} target(s) in one nix build call",
+            targets.len()
+        ));
         let built = derivation::build_many(&targets, ctx.nix_args)?;
 
         // Phase 3: map each path's recipe back to its built output.
         for (path, (drv, output_name)) in recipe_of {
-            let new_path = built.get(&(drv.clone(), output_name.clone())).cloned().with_context(|| {
-                format!("nix build did not report an output for {}'s recipe ({}^{output_name})", path.display(), drv.display())
-            })?;
+            let new_path = built
+                .get(&(drv.clone(), output_name.clone()))
+                .cloned()
+                .with_context(|| {
+                    format!(
+                        "nix build did not report an output for {}'s recipe ({}^{output_name})",
+                        path.display(),
+                        drv.display()
+                    )
+                })?;
             log::v(format!("{} -> {}", path.display(), new_path.display()));
             eprintln!(
                 "{} {} -> {}",
-                if matches!(nodes[&path].category, Category::NeedsRebuild) { "rebuilt" } else { "grafted" },
+                if matches!(nodes[&path].category, Category::NeedsRebuild) {
+                    "rebuilt"
+                } else {
+                    "grafted"
+                },
                 path.display(),
                 new_path.display()
             );
@@ -261,11 +326,20 @@ pub fn replace(closure_root: &Path, replacements: &[(PathBuf, PathBuf)], opts: &
     }
 
     eprintln!("{}", tally.summarize());
-    let new_root = resolved
-        .get(closure_root)
-        .cloned()
-        .with_context(|| format!("closure root {} missing from resolved map", closure_root.display()))?;
-    write_report_if_requested(opts, closure_root, &new_root, &nodes, Some(&resolved), &tally)?;
+    let new_root = resolved.get(closure_root).cloned().with_context(|| {
+        format!(
+            "closure root {} missing from resolved map",
+            closure_root.display()
+        )
+    })?;
+    write_report_if_requested(
+        opts,
+        closure_root,
+        &new_root,
+        &nodes,
+        Some(&resolved),
+        &tally,
+    )?;
     Ok(ReplaceResult { new_root })
 }
 
@@ -282,12 +356,22 @@ fn write_report_if_requested(
     resolved: Option<&HashMap<PathBuf, PathBuf>>,
     tally: &Tally,
 ) -> Result<()> {
-    let Some(dir) = opts.report else { return Ok(()) };
+    let Some(dir) = opts.report else {
+        return Ok(());
+    };
     // Created here, before any diffoscope call — diffoscope doesn't create
     // its own output directory and fails with a raw traceback if it's missing.
-    std::fs::create_dir_all(dir).with_context(|| format!("failed to create report directory {}", dir.display()))?;
+    std::fs::create_dir_all(dir)
+        .with_context(|| format!("failed to create report directory {}", dir.display()))?;
     let report_nodes = build_report_nodes(dir, opts.report_diff, nodes, resolved)?;
-    let index = report::write(dir, closure_root, new_root, opts.dry_run, &tally.summarize(), &report_nodes)?;
+    let index = report::write(
+        dir,
+        closure_root,
+        new_root,
+        opts.dry_run,
+        &tally.summarize(),
+        &report_nodes,
+    )?;
     eprintln!("wrote report to {}", index.display());
     Ok(())
 }
@@ -301,7 +385,11 @@ fn build_report_nodes(
     // `Cutoff` is a deliberate decision worth showing (part of the graft's
     // story: "propagation stopped here, on purpose") — only `Unchanged`
     // ("nothing happened here") is genuine noise.
-    let included: HashSet<&PathBuf> = nodes.iter().filter(|(_, n)| !matches!(n.category, Category::Unchanged)).map(|(p, _)| p).collect();
+    let included: HashSet<&PathBuf> = nodes
+        .iter()
+        .filter(|(_, n)| !matches!(n.category, Category::Unchanged))
+        .map(|(p, _)| p)
+        .collect();
     let mut out = Vec::new();
     for (path, node) in nodes {
         if !included.contains(path) {
@@ -309,21 +397,47 @@ fn build_report_nodes(
         }
         let (label, color, new_path, diffable) = match &node.category {
             Category::Explicit(new) => ("explicit replacement", "#2563eb", Some(new.clone()), true),
-            Category::NeedsGraft => ("grafted", "#16a34a", resolved.and_then(|r| r.get(path).cloned()), true),
-            Category::NeedsRebuild => ("rebuilt", "#ea580c", resolved.and_then(|r| r.get(path).cloned()), true),
+            Category::NeedsGraft => (
+                "grafted",
+                "#16a34a",
+                resolved.and_then(|r| r.get(path).cloned()),
+                true,
+            ),
+            Category::NeedsRebuild => (
+                "rebuilt",
+                "#ea580c",
+                resolved.and_then(|r| r.get(path).cloned()),
+                true,
+            ),
             // Resolves to itself by definition — nothing to diff against.
             Category::Cutoff => ("cutoff", "#6b7280", Some(path.clone()), false),
             Category::Unchanged => unreachable!("filtered out above"),
         };
-        let depends_on = store::references(path)?.into_iter().filter(|r| included.contains(r)).collect();
+        let depends_on = store::references(path)?
+            .into_iter()
+            .filter(|r| included.contains(r))
+            .collect();
 
         let (nix_diff, diffoscope_html) = if report_diff && diffable {
-            diffs_for(dir, path, new_path.as_deref(), matches!(node.category, Category::NeedsGraft))
+            diffs_for(
+                dir,
+                path,
+                new_path.as_deref(),
+                matches!(node.category, Category::NeedsGraft),
+            )
         } else {
             (None, None)
         };
 
-        out.push(report::ReportNode { path: path.clone(), label, color, new_path, depends_on, nix_diff, diffoscope_html });
+        out.push(report::ReportNode {
+            path: path.clone(),
+            label,
+            color,
+            new_path,
+            depends_on,
+            nix_diff,
+            diffoscope_html,
+        });
     }
     Ok(out)
 }
@@ -332,14 +446,24 @@ fn build_report_nodes(
 /// report over one node's diff tooling — a missing `nix-diff`/`diffoscope`,
 /// or a path with no known deriver, just means that node's diff is omitted
 /// (logged under `-v`), not a hard error for an otherwise-successful graft.
-fn diffs_for(dir: &Path, path: &Path, new_path: Option<&Path>, is_graft: bool) -> (Option<String>, Option<String>) {
-    let Some(new_path) = new_path else { return (None, None) };
+fn diffs_for(
+    dir: &Path,
+    path: &Path,
+    new_path: Option<&Path>,
+    is_graft: bool,
+) -> (Option<String>, Option<String>) {
+    let Some(new_path) = new_path else {
+        return (None, None);
+    };
 
     // Grafting never changes the derivation — nothing for nix-diff to show.
     let nix_diff = if is_graft {
         None
     } else {
-        match (derivation::deriver_of(path), derivation::deriver_of(new_path)) {
+        match (
+            derivation::deriver_of(path),
+            derivation::deriver_of(new_path),
+        ) {
             (Ok(old_drv), Ok(new_drv)) => match diff::nix_diff(&old_drv, &new_drv) {
                 Ok(text) => Some(text),
                 Err(e) => {
@@ -348,13 +472,19 @@ fn diffs_for(dir: &Path, path: &Path, new_path: Option<&Path>, is_graft: bool) -
                 }
             },
             _ => {
-                log::v(format!("nix-diff for {} skipped: no known deriver on one or both sides", path.display()));
+                log::v(format!(
+                    "nix-diff for {} skipped: no known deriver on one or both sides",
+                    path.display()
+                ));
                 None
             }
         }
     };
 
-    let file_name = format!("diffoscope-{}.html", store::basename(path).unwrap_or_else(|_| "unknown".to_string()));
+    let file_name = format!(
+        "diffoscope-{}.html",
+        store::basename(path).unwrap_or_else(|_| "unknown".to_string())
+    );
     let out_html = dir.join(&file_name);
     let diffoscope_html = match diff::diffoscope_html(path, new_path, &out_html) {
         Ok(()) => Some(file_name),
@@ -418,11 +548,24 @@ fn classify(path: &Path, ctx: &Ctx, memo: &mut HashMap<PathBuf, Node>) -> Result
         return Ok(n.clone());
     }
     let node = if let Some(new) = ctx.explicit.get(path) {
-        log::v(format!("{} is an explicit replacement target -> {}", path.display(), new.display()));
-        Node { category: Category::Explicit(new.clone()), level: 0 }
+        log::v(format!(
+            "{} is an explicit replacement target -> {}",
+            path.display(),
+            new.display()
+        ));
+        Node {
+            category: Category::Explicit(new.clone()),
+            level: 0,
+        }
     } else if ctx.cutoffs.contains(path) {
-        log::v(format!("{}: cutoff, left as-is (not checking its references)", path.display()));
-        Node { category: Category::Cutoff, level: 0 }
+        log::v(format!(
+            "{}: cutoff, left as-is (not checking its references)",
+            path.display()
+        ));
+        Node {
+            category: Category::Cutoff,
+            level: 0,
+        }
     } else {
         let mut max_dep_level = 0;
         let mut any_changed = false;
@@ -438,14 +581,25 @@ fn classify(path: &Path, ctx: &Ctx, memo: &mut HashMap<PathBuf, Node>) -> Result
             }
         }
         if any_changed {
-            let use_rebuild = (ctx.full_rebuild || ctx.force_rebuild.contains(path)) && !ctx.force_graft.contains(path);
+            let use_rebuild = (ctx.full_rebuild || ctx.force_rebuild.contains(path))
+                && !ctx.force_graft.contains(path);
             Node {
-                category: if use_rebuild { Category::NeedsRebuild } else { Category::NeedsGraft },
+                category: if use_rebuild {
+                    Category::NeedsRebuild
+                } else {
+                    Category::NeedsGraft
+                },
                 level: max_dep_level + 1,
             }
         } else {
-            log::v(format!("{}: no changed references, left as-is", path.display()));
-            Node { category: Category::Unchanged, level: 0 }
+            log::v(format!(
+                "{}: no changed references, left as-is",
+                path.display()
+            ));
+            Node {
+                category: Category::Unchanged,
+                level: 0,
+            }
         }
     };
     memo.insert(path.to_path_buf(), node.clone());
@@ -489,7 +643,11 @@ fn changed_refs_of(path: &Path, nodes: &HashMap<PathBuf, Node>) -> Result<Vec<Pa
 /// `resolved` before this level started) and dispatches to
 /// `graft_recipe`/`rebuild::rebuild_recipe`. Building the recipe is a
 /// separate step (`derivation::build_many`, batched across the whole level).
-fn build_recipe(path: &Path, use_rebuild: bool, resolved: &HashMap<PathBuf, PathBuf>) -> Result<(PathBuf, String)> {
+fn build_recipe(
+    path: &Path,
+    use_rebuild: bool,
+    resolved: &HashMap<PathBuf, PathBuf>,
+) -> Result<(PathBuf, String)> {
     let all_refs: Vec<(PathBuf, PathBuf)> = store::references(path)?
         .into_iter()
         .map(|r| {
@@ -570,7 +728,11 @@ fn report_rebuild_feasibility(path: &Path, changed_refs: &[PathBuf]) -> Result<(
             );
         }
         Some(missing) if !missing.is_empty() => {
-            let names = missing.iter().map(|m| m.display().to_string()).collect::<Vec<_>>().join(", ");
+            let names = missing
+                .iter()
+                .map(|m| m.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
             eprintln!(
                 "[dry-run] would attempt --rebuild for {} but {names} {} not declared in its own \
                  .drv (only reachable via the runtime reference graph) — this WILL fail; pass \
@@ -642,19 +804,32 @@ fn interactive_select(
     todo.push_str("#   rebuild / r - real dependency substitution + sandboxed rebuild\n");
     todo.push_str("#   cutoff  / c - never touch this path; propagation stops here\n#\n");
     todo.push_str("# Dependency order is fixed by the graph, not by this file — do not reorder\n");
-    todo.push_str("# or delete lines; every path listed here must still be present when you save.\n");
+    todo.push_str(
+        "# or delete lines; every path listed here must still be present when you save.\n",
+    );
     todo.push_str("# A `# rebuild not possible: ...` line can't use `rebuild` — the dependency\n");
     todo.push_str("# isn't declared in that path's own .drv (only reachable via the runtime\n");
     todo.push_str("# reference graph), so grafting is the only option there.\n\n");
     for p in &affected {
-        let mut default = if full_rebuild || force_rebuild.contains(p) { "rebuild" } else { "graft" };
+        let mut default = if full_rebuild || force_rebuild.contains(p) {
+            "rebuild"
+        } else {
+            "graft"
+        };
         if force_graft.contains(p) {
             default = "graft";
         }
         match rebuild_infeasible.get(p) {
             Some(missing) => {
-                let names = missing.iter().map(|m| m.display().to_string()).collect::<Vec<_>>().join(", ");
-                todo.push_str(&format!("graft {}  # rebuild not possible: {names} not declared in its own .drv\n", p.display()));
+                let names = missing
+                    .iter()
+                    .map(|m| m.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                todo.push_str(&format!(
+                    "graft {}  # rebuild not possible: {names} not declared in its own .drv\n",
+                    p.display()
+                ));
             }
             None => {
                 todo.push_str(&format!("{default} {}\n", p.display()));
@@ -662,9 +837,14 @@ fn interactive_select(
         }
     }
 
-    let tmp = tempfile::NamedTempFile::new().context("failed to create scratch file for interactive strategy selection")?;
+    let tmp = tempfile::NamedTempFile::new()
+        .context("failed to create scratch file for interactive strategy selection")?;
     std::fs::write(tmp.path(), &todo)?;
-    log::v(format!("opening $EDITOR on {} ({} affected path(s))", tmp.path().display(), affected.len()));
+    log::v(format!(
+        "opening $EDITOR on {} ({} affected path(s))",
+        tmp.path().display(),
+        affected.len()
+    ));
     editor::edit(tmp.path())?;
     let edited = std::fs::read_to_string(tmp.path())?;
 
@@ -694,7 +874,11 @@ fn interactive_select(
             }
             "rebuild" | "r" => {
                 if let Some(missing) = rebuild_infeasible.get(&path) {
-                    let names = missing.iter().map(|m| m.display().to_string()).collect::<Vec<_>>().join(", ");
+                    let names = missing
+                        .iter()
+                        .map(|m| m.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ");
                     bail!(
                         "cannot select `rebuild` for {}: {names} not declared in its own .drv \
                          (only reachable via the runtime reference graph) — pick `graft` or \
@@ -707,7 +891,9 @@ fn interactive_select(
             "cutoff" | "c" => {
                 cutoffs.insert(path);
             }
-            other => bail!("unknown strategy `{other}` (expected graft/g, rebuild/r, or cutoff/c): {line}"),
+            other => bail!(
+                "unknown strategy `{other}` (expected graft/g, rebuild/r, or cutoff/c): {line}"
+            ),
         }
     }
     if seen.len() != affected.len() {

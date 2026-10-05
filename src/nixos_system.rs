@@ -63,11 +63,18 @@ fn activate(profile: &str, new_root: &Path, action: SwitchAction) -> Result<()> 
         .status()
         .context("failed to spawn nix-env --set")?;
     if !status.success() {
-        bail!("nix-env --profile {profile} --set {} failed", new_root.display());
+        bail!(
+            "nix-env --profile {profile} --set {} failed",
+            new_root.display()
+        );
     }
 
     let switch_bin = new_root.join("bin/switch-to-configuration");
-    log::v(format!("running {} {}", switch_bin.display(), action.as_str()));
+    log::v(format!(
+        "running {} {}",
+        switch_bin.display(),
+        action.as_str()
+    ));
     let status = Command::new(&switch_bin)
         .arg(action.as_str())
         .status()

@@ -33,16 +33,29 @@ pub struct ReportNode {
 /// CDN, no build step) static report — a dependency graph laid out by row
 /// (each row: `1 +` the deepest row among a node's own *included* direct
 /// references) plus a details table. Returns the written file's path.
-pub fn write(dir: &Path, closure_root: &Path, new_root: &Path, dry_run: bool, summary: &str, nodes: &[ReportNode]) -> Result<PathBuf> {
-    fs::create_dir_all(dir).with_context(|| format!("failed to create report directory {}", dir.display()))?;
+pub fn write(
+    dir: &Path,
+    closure_root: &Path,
+    new_root: &Path,
+    dry_run: bool,
+    summary: &str,
+    nodes: &[ReportNode],
+) -> Result<PathBuf> {
+    fs::create_dir_all(dir)
+        .with_context(|| format!("failed to create report directory {}", dir.display()))?;
     let index = dir.join("index.html");
-    fs::write(&index, render(closure_root, new_root, dry_run, summary, nodes))
-        .with_context(|| format!("failed to write {}", index.display()))?;
+    fs::write(
+        &index,
+        render(closure_root, new_root, dry_run, summary, nodes),
+    )
+    .with_context(|| format!("failed to write {}", index.display()))?;
     Ok(index)
 }
 
 fn short_name(p: &Path) -> String {
-    p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| p.display().to_string())
+    p.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| p.display().to_string())
 }
 
 /// Just the `name-version` part, stripping the 32-character hash — the
@@ -59,7 +72,11 @@ fn graph_label(p: &Path) -> String {
 /// Computed fresh from the same `depends_on` edges the graph already
 /// draws, so every category lands on a row reflecting its real place in
 /// the graph: `1 +` the deepest *included* direct reference.
-fn graph_row<'a>(path: &'a Path, by_path: &HashMap<&'a Path, &'a ReportNode>, memo: &mut HashMap<&'a Path, u32>) -> u32 {
+fn graph_row<'a>(
+    path: &'a Path,
+    by_path: &HashMap<&'a Path, &'a ReportNode>,
+    memo: &mut HashMap<&'a Path, u32>,
+) -> u32 {
     if let Some(&d) = memo.get(&path) {
         return d;
     }
@@ -75,17 +92,33 @@ fn graph_row<'a>(path: &'a Path, by_path: &HashMap<&'a Path, &'a ReportNode>, me
     d
 }
 
-fn render(closure_root: &Path, new_root: &Path, dry_run: bool, summary: &str, nodes: &[ReportNode]) -> String {
+fn render(
+    closure_root: &Path,
+    new_root: &Path,
+    dry_run: bool,
+    summary: &str,
+    nodes: &[ReportNode],
+) -> String {
     const ROW_HEIGHT: u32 = 90;
     const COL_WIDTH: u32 = 170;
     const NODE_RADIUS: u32 = 28;
 
-    let by_path: HashMap<&Path, &ReportNode> = nodes.iter().map(|n| (n.path.as_path(), n)).collect();
+    let by_path: HashMap<&Path, &ReportNode> =
+        nodes.iter().map(|n| (n.path.as_path(), n)).collect();
     let mut row_memo = HashMap::new();
-    let rows: HashMap<&Path, u32> = nodes.iter().map(|n| (n.path.as_path(), graph_row(n.path.as_path(), &by_path, &mut row_memo))).collect();
+    let rows: HashMap<&Path, u32> = nodes
+        .iter()
+        .map(|n| {
+            (
+                n.path.as_path(),
+                graph_row(n.path.as_path(), &by_path, &mut row_memo),
+            )
+        })
+        .collect();
 
     let max_level = rows.values().copied().max().unwrap_or(0);
-    let mut by_level: Vec<Vec<&ReportNode>> = (0..=max_level as usize).map(|_| Vec::new()).collect();
+    let mut by_level: Vec<Vec<&ReportNode>> =
+        (0..=max_level as usize).map(|_| Vec::new()).collect();
     for n in nodes {
         by_level[rows[n.path.as_path()] as usize].push(n);
     }
@@ -118,7 +151,10 @@ fn render(closure_root: &Path, new_root: &Path, dry_run: bool, summary: &str, no
         let tooltip = format!(
             "{} -> {}",
             node.path.display(),
-            node.new_path.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "(pending)".to_string())
+            node.new_path
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "(pending)".to_string())
         );
         let _ = writeln!(
             svg_nodes,
@@ -135,10 +171,18 @@ fn render(closure_root: &Path, new_root: &Path, dry_run: bool, summary: &str, no
     for n in nodes {
         let mut diff_cell = String::new();
         if let Some(text) = &n.nix_diff {
-            let _ = write!(diff_cell, "<details><summary>nix-diff</summary><pre>{}</pre></details>", escape(text));
+            let _ = write!(
+                diff_cell,
+                "<details><summary>nix-diff</summary><pre>{}</pre></details>",
+                escape(text)
+            );
         }
         if let Some(file) = &n.diffoscope_html {
-            let _ = write!(diff_cell, r#"<a href="{}" target="_blank">diffoscope</a>"#, escape(file));
+            let _ = write!(
+                diff_cell,
+                r#"<a href="{}" target="_blank">diffoscope</a>"#,
+                escape(file)
+            );
         }
         let _ = writeln!(
             rows_html,
@@ -148,7 +192,10 @@ fn render(closure_root: &Path, new_root: &Path, dry_run: bool, summary: &str, no
             n.color,
             n.label,
             escape(&n.path.display().to_string()),
-            n.new_path.as_ref().map(|p| escape(&p.display().to_string())).unwrap_or_else(|| "(pending)".to_string()),
+            n.new_path
+                .as_ref()
+                .map(|p| escape(&p.display().to_string()))
+                .unwrap_or_else(|| "(pending)".to_string()),
             diff_cell,
         );
     }
@@ -194,5 +241,8 @@ fn render(closure_root: &Path, new_root: &Path, dry_run: bool, summary: &str, no
 }
 
 fn escape(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }

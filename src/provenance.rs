@@ -13,7 +13,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// for one cosmetic improvement. `date -d @<timestamp>` (or `jq`, if
 /// scripting against the file) converts it trivially.
 pub fn record(out_link: &Path, new_root: &Path) -> Result<()> {
-    let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     let entry = serde_json::json!({
         "timestamp": timestamp,
         "command": std::env::args().collect::<Vec<_>>(),
@@ -25,7 +28,8 @@ pub fn record(out_link: &Path, new_root: &Path) -> Result<()> {
         .append(true)
         .open(&history_path)
         .with_context(|| format!("failed to open {} for appending", history_path.display()))?;
-    writeln!(file, "{entry}").with_context(|| format!("failed to write to {}", history_path.display()))
+    writeln!(file, "{entry}")
+        .with_context(|| format!("failed to write to {}", history_path.display()))
 }
 
 fn history_path_for(out_link: &Path) -> PathBuf {

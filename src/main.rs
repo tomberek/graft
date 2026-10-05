@@ -270,7 +270,11 @@ enum Cmd {
 /// check an `--edit` that turns out to be a file-edit needs is computed at
 /// most once, not once per occurrence, since several may be combined in
 /// one invocation.
-fn collect_pairs(closure_root: &Path, nix_args: &[String], transforms: TransformArgs) -> Result<Vec<(PathBuf, PathBuf)>> {
+fn collect_pairs(
+    closure_root: &Path,
+    nix_args: &[String],
+    transforms: TransformArgs,
+) -> Result<Vec<(PathBuf, PathBuf)>> {
     let TransformArgs { overrides, edit } = transforms;
     let mut pairs = Vec::new();
     let mut closure_cache: Option<Vec<PathBuf>> = None;
@@ -278,7 +282,13 @@ fn collect_pairs(closure_root: &Path, nix_args: &[String], transforms: Transform
         pairs.extend(resolve_override(&pair[0], &pair[1], nix_args)?);
     }
     for pair in edit.chunks(2) {
-        pairs.extend(detect_edit(&pair[0], &pair[1], closure_root, nix_args, &mut closure_cache)?);
+        pairs.extend(detect_edit(
+            &pair[0],
+            &pair[1],
+            closure_root,
+            nix_args,
+            &mut closure_cache,
+        )?);
     }
     if pairs.is_empty() {
         bail!("at least one of --override or --edit is required");
@@ -300,7 +310,10 @@ fn resolve_override(old: &str, new: &str, nix_args: &[String]) -> Result<Vec<(Pa
         bail!("--override {old} {new}: either both sides use `^*` (all outputs) or neither does");
     }
     if !old_all {
-        return Ok(vec![(installable::resolve(old, nix_args)?, installable::resolve(new, nix_args)?)]);
+        return Ok(vec![(
+            installable::resolve(old, nix_args)?,
+            installable::resolve(new, nix_args)?,
+        )]);
     }
     let old_outputs = derivation::resolve_outputs(old, nix_args)?;
     let new_outputs = derivation::resolve_outputs(new, nix_args)?;
@@ -314,7 +327,10 @@ fn resolve_override(old: &str, new: &str, nix_args: &[String]) -> Result<Vec<(Pa
     Ok(pairs)
 }
 
-fn ensure_closure<'a>(cache: &'a mut Option<Vec<PathBuf>>, closure_root: &Path) -> Result<&'a [PathBuf]> {
+fn ensure_closure<'a>(
+    cache: &'a mut Option<Vec<PathBuf>>,
+    closure_root: &Path,
+) -> Result<&'a [PathBuf]> {
     if cache.is_none() {
         *cache = Some(store::closure(closure_root)?);
     }
@@ -356,14 +372,22 @@ fn detect_edit(
     }
 
     if installable::is_legacy_nix_file(Path::new(path)) {
-        let installable = if selector == "." { path.to_string() } else { format!("{path}#{selector}") };
+        let installable = if selector == "." {
+            path.to_string()
+        } else {
+            format!("{path}#{selector}")
+        };
         return Ok(vec![edit_nix::produce_pair(&installable, nix_args)?]);
     }
 
     let resolved = installable::resolve(path, nix_args)?;
 
     if resolved.extension().and_then(|e| e.to_str()) == Some("drv") {
-        let output = if selector == "." { None } else { Some(selector) };
+        let output = if selector == "." {
+            None
+        } else {
+            Some(selector)
+        };
         return Ok(vec![edit_drv::produce_pair(&resolved, output, nix_args)?]);
     }
 
@@ -375,27 +399,58 @@ fn detect_edit(
     // when `selector` isn't an existing subpath: does it instead name one
     // of this path's own deriver's outputs? Subpath wins when both apply,
     // since it's the more literal reading of "edit this path".
-    if selector != "." && !resolved.join(selector).exists() && derivation::has_output(&resolved, selector) {
-        return Ok(vec![edit_drv::produce_pair(&resolved, Some(selector), nix_args)?]);
+    if selector != "."
+        && !resolved.join(selector).exists()
+        && derivation::has_output(&resolved, selector)
+    {
+        return Ok(vec![edit_drv::produce_pair(
+            &resolved,
+            Some(selector),
+            nix_args,
+        )?]);
     }
 
     let closure = ensure_closure(closure_cache, closure_root)?;
-    let subpath = if selector == "." { None } else { Some(Path::new(selector)) };
-    Ok(vec![edit_file::produce_pair(closure_root, closure, &resolved, subpath)?])
+    let subpath = if selector == "." {
+        None
+    } else {
+        Some(Path::new(selector))
+    };
+    Ok(vec![edit_file::produce_pair(
+        closure_root,
+        closure,
+        &resolved,
+        subpath,
+    )?])
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
     log::set_verbose(cli.verbose);
     let (result, out_link, nix_args) = match cli.command {
-        Cmd::Replace { closure_root, transforms, strategy, nix_args } => {
+        Cmd::Replace {
+            closure_root,
+            transforms,
+            strategy,
+            nix_args,
+        } => {
             let nix_args = strategy.merged_nix_args(nix_args);
             let closure_root = installable::resolve(&closure_root, &nix_args)?;
             let pairs = collect_pairs(&closure_root, &nix_args, transforms)?;
             let out_link = out_link_unless_dry_run(&strategy);
-            (replace::replace(&closure_root, &pairs, &strategy.opts(&nix_args))?, out_link, nix_args)
+            (
+                replace::replace(&closure_root, &pairs, &strategy.opts(&nix_args))?,
+                out_link,
+                nix_args,
+            )
         }
-        Cmd::NixosSystem { profile, transforms, strategy, switch, nix_args } => {
+        Cmd::NixosSystem {
+            profile,
+            transforms,
+            strategy,
+            switch,
+            nix_args,
+        } => {
             let nix_args = strategy.merged_nix_args(nix_args);
             let closure_root = installable::resolve(&profile, &nix_args).with_context(|| {
                 format!(
@@ -405,7 +460,17 @@ fn main() -> Result<()> {
             })?;
             let pairs = collect_pairs(&closure_root, &nix_args, transforms)?;
             let out_link = out_link_unless_dry_run(&strategy);
-            (nixos_system::run(&profile, &closure_root, &pairs, &strategy.opts(&nix_args), switch)?, out_link, nix_args)
+            (
+                nixos_system::run(
+                    &profile,
+                    &closure_root,
+                    &pairs,
+                    &strategy.opts(&nix_args),
+                    switch,
+                )?,
+                out_link,
+                nix_args,
+            )
         }
     };
     if let Some(link) = out_link {

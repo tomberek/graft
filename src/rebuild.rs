@@ -19,10 +19,16 @@ use std::path::{Path, PathBuf};
 pub fn rebuild_recipe(path: &Path, all_refs: &[(PathBuf, PathBuf)]) -> Result<(PathBuf, String)> {
     let changed: Vec<&(PathBuf, PathBuf)> = all_refs.iter().filter(|(o, n)| o != n).collect();
 
-    log::v(format!("rebuilding {} ({} changed dependency/ies)", path.display(), changed.len()));
-    let deriver = derivation::deriver_of(path).with_context(|| format!("cannot rebuild {}", path.display()))?;
+    log::v(format!(
+        "rebuilding {} ({} changed dependency/ies)",
+        path.display(),
+        changed.len()
+    ));
+    let deriver = derivation::deriver_of(path)
+        .with_context(|| format!("cannot rebuild {}", path.display()))?;
     let shown = derivation::show(&deriver)?;
-    let (output_name, _output_path, mut inner) = derivation::locate_output(&shown, &deriver, Some(OutputTarget::Path(path)))?;
+    let (output_name, _output_path, mut inner) =
+        derivation::locate_output(&shown, &deriver, Some(OutputTarget::Path(path)))?;
 
     for (old, new) in &changed {
         log::v(format!(
@@ -61,17 +67,25 @@ pub fn rebuild_recipe(path: &Path, all_refs: &[(PathBuf, PathBuf)]) -> Result<(P
 /// Reuses `substitute_dependency` with `old` as both the old and new value
 /// (a no-op probe) rather than a separate check that could drift out of
 /// sync with what a real rebuild would find.
-pub fn unlocatable_dependencies(path: &Path, changed_old_refs: &[PathBuf]) -> Result<Option<Vec<PathBuf>>> {
+pub fn unlocatable_dependencies(
+    path: &Path,
+    changed_old_refs: &[PathBuf],
+) -> Result<Option<Vec<PathBuf>>> {
     let deriver = match derivation::deriver_of(path) {
         Ok(d) => d,
         Err(_) => return Ok(None),
     };
     let shown = derivation::show(&deriver)?;
-    let (_, _, inner) = derivation::locate_output(&shown, &deriver, Some(OutputTarget::Path(path)))?;
+    let (_, _, inner) =
+        derivation::locate_output(&shown, &deriver, Some(OutputTarget::Path(path)))?;
 
     let mut missing = Vec::new();
     for old in changed_old_refs {
-        log::v(format!("checking whether --rebuild could locate {} in {}'s derivation", old.display(), path.display()));
+        log::v(format!(
+            "checking whether --rebuild could locate {} in {}'s derivation",
+            old.display(),
+            path.display()
+        ));
         let mut probe = inner.clone();
         if !substitute_dependency(&mut probe, old, old)? {
             missing.push(old.clone());
@@ -85,7 +99,8 @@ pub fn unlocatable_dependencies(path: &Path, changed_old_refs: &[PathBuf]) -> Re
 fn own_output(path: &Path) -> Option<(PathBuf, String)> {
     let drv = derivation::deriver_of(path).ok()?;
     let shown = derivation::show(&drv).ok()?;
-    let (name, _, _) = derivation::locate_output(&shown, &drv, Some(OutputTarget::Path(path))).ok()?;
+    let (name, _, _) =
+        derivation::locate_output(&shown, &drv, Some(OutputTarget::Path(path))).ok()?;
     Some((drv, name))
 }
 
@@ -115,10 +130,13 @@ fn substitute_dependency(inner: &mut Value, old: &Path, new: &Path) -> Result<bo
             .and_then(|d| d.get(&old_drv_base))
             .is_some();
         if has_entry {
-            let drvs = inner["inputs"]["drvs"].as_object_mut().context("derivation has no `inputs.drvs`")?;
+            let drvs = inner["inputs"]["drvs"]
+                .as_object_mut()
+                .context("derivation has no `inputs.drvs`")?;
             let mut drop_entry = false;
             if let Some(entry) = drvs.get_mut(&old_drv_base) {
-                if let Some(outputs_list) = entry.get_mut("outputs").and_then(|o| o.as_array_mut()) {
+                if let Some(outputs_list) = entry.get_mut("outputs").and_then(|o| o.as_array_mut())
+                {
                     let before = outputs_list.len();
                     outputs_list.retain(|v| v.as_str() != Some(old_output_name.as_str()));
                     if outputs_list.len() < before {
@@ -136,10 +154,12 @@ fn substitute_dependency(inner: &mut Value, old: &Path, new: &Path) -> Result<bo
                     Some((new_drv, new_output_name)) => {
                         let new_drv_base = store::basename(&new_drv)?;
                         let drvs = inner["inputs"]["drvs"].as_object_mut().unwrap();
-                        let entry = drvs
-                            .entry(new_drv_base.clone())
-                            .or_insert_with(|| serde_json::json!({ "dynamicOutputs": {}, "outputs": [] }));
-                        let outputs_list = entry["outputs"].as_array_mut().context("inputs.drvs entry has no `outputs` array")?;
+                        let entry = drvs.entry(new_drv_base.clone()).or_insert_with(
+                            || serde_json::json!({ "dynamicOutputs": {}, "outputs": [] }),
+                        );
+                        let outputs_list = entry["outputs"]
+                            .as_array_mut()
+                            .context("inputs.drvs entry has no `outputs` array")?;
                         let name_val = Value::String(new_output_name.clone());
                         if !outputs_list.contains(&name_val) {
                             outputs_list.push(name_val);
@@ -162,7 +182,11 @@ fn substitute_dependency(inner: &mut Value, old: &Path, new: &Path) -> Result<bo
         }
     }
 
-    if let Some(srcs) = inner.get_mut("inputs").and_then(|i| i.get_mut("srcs")).and_then(|s| s.as_array_mut()) {
+    if let Some(srcs) = inner
+        .get_mut("inputs")
+        .and_then(|i| i.get_mut("srcs"))
+        .and_then(|s| s.as_array_mut())
+    {
         for v in srcs.iter_mut() {
             if v.as_str() == Some(old_base.as_str()) {
                 log::v(format!("  inputs.srcs: {old_base} -> {new_base}"));
@@ -177,7 +201,10 @@ fn substitute_dependency(inner: &mut Value, old: &Path, new: &Path) -> Result<bo
             if let Some(s) = v.as_str() {
                 if s.contains(&old_full) || s.contains(old_base.as_str()) {
                     log::v(format!("  env.{k}: substituted {old_base} -> {new_base}"));
-                    *v = Value::String(s.replace(&old_full, &new_full).replace(old_base.as_str(), new_base.as_str()));
+                    *v = Value::String(
+                        s.replace(&old_full, &new_full)
+                            .replace(old_base.as_str(), new_base.as_str()),
+                    );
                     found = true;
                 }
             }
