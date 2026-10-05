@@ -1,6 +1,6 @@
 use crate::log;
 use anyhow::{bail, Context, Result};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -112,31 +112,49 @@ pub fn closure(path: &Path) -> Result<Vec<PathBuf>> {
     Ok(lines_to_paths(&out))
 }
 
-/// Direct references of `path`, excluding self-references. Goes through
-/// `nix path-info --json`'s `references` array — there's no subcommand that
-/// lists just the direct references on its own.
-pub fn references(path: &Path) -> Result<Vec<PathBuf>> {
-    let out = run("nix", &["path-info", "--json", path_str(path)?])?;
+/// Direct references of every path in `paths`, batched into a single `nix
+/// path-info --json` call instead of one per path — a closure walk doing
+/// one `nix path-info` per member doesn't scale to a real closure
+/// (thousands of paths); `nix path-info --json` already accepts multiple
+/// installables at once, returning one JSON object keyed by path, so
+/// there's no reason to call it more than once. Same self-reference
+/// exclusion as a single-path lookup would have.
+pub fn references_many(paths: &[PathBuf]) -> Result<HashMap<PathBuf, Vec<PathBuf>>> {
+    if paths.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let path_strs: Vec<&str> = paths.iter().map(|p| path_str(p)).collect::<Result<_>>()?;
+    let mut args = vec!["path-info", "--json"];
+    args.extend(path_strs);
+    let out = run("nix", &args)?;
     let parsed: serde_json::Value =
         serde_json::from_str(&out).context("nix path-info --json did not produce valid JSON")?;
-    let entry = parsed
-        .get(path_str(path)?)
-        .with_context(|| format!("nix path-info --json had no entry for {}", path.display()))?;
-    let refs = entry
-        .get("references")
-        .and_then(|r| r.as_array())
-        .with_context(|| {
-            format!(
-                "nix path-info --json entry for {} has no references array",
-                path.display()
-            )
-        })?;
-    Ok(refs
-        .iter()
-        .filter_map(|v| v.as_str())
-        .map(PathBuf::from)
-        .filter(|p| p != path)
-        .collect())
+    let obj = parsed
+        .as_object()
+        .context("nix path-info --json did not produce a JSON object")?;
+    let mut result = HashMap::with_capacity(paths.len());
+    for path in paths {
+        let entry = obj
+            .get(path_str(path)?)
+            .with_context(|| format!("nix path-info --json had no entry for {}", path.display()))?;
+        let refs = entry
+            .get("references")
+            .and_then(|r| r.as_array())
+            .with_context(|| {
+                format!(
+                    "nix path-info --json entry for {} has no references array",
+                    path.display()
+                )
+            })?;
+        let refs: Vec<PathBuf> = refs
+            .iter()
+            .filter_map(|v| v.as_str())
+            .map(PathBuf::from)
+            .filter(|p| p != path)
+            .collect();
+        result.insert(path.clone(), refs);
+    }
+    Ok(result)
 }
 
 fn lines_to_paths(out: &str) -> Vec<PathBuf> {

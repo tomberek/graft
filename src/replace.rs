@@ -163,6 +163,9 @@ pub fn replace(
         closure_root.display(),
         closure_paths.len()
     ));
+    // One batched call for the whole closure's direct references, not one
+    // `nix path-info` per member — see `store::references_many`.
+    let refs = store::references_many(&closure_paths)?;
 
     for (old, new) in &explicit {
         if !closure_paths.contains(old) {
@@ -180,6 +183,7 @@ pub fn replace(
         interactive_select(
             &closure_paths,
             &explicit,
+            &refs,
             opts.full_rebuild,
             &mut cutoffs,
             &mut force_rebuild,
@@ -192,13 +196,14 @@ pub fn replace(
         cutoffs: &cutoffs,
         force_rebuild: &force_rebuild,
         force_graft: &force_graft,
+        refs: &refs,
         nix_args: opts.nix_args,
         full_rebuild: opts.full_rebuild,
     };
 
     let mut nodes: HashMap<PathBuf, Node> = HashMap::new();
     for p in &closure_paths {
-        classify(p, &ctx, &mut nodes)?;
+        classify(p, &ctx, &mut nodes);
     }
     let tally = tally_of(&nodes);
 
@@ -215,13 +220,21 @@ pub fn replace(
                 Category::Cutoff | Category::Unchanged => {}
                 Category::NeedsGraft => eprintln!("[dry-run] would graft {}", p.display()),
                 Category::NeedsRebuild => {
-                    let changed_refs = changed_refs_of(p, &nodes)?;
+                    let changed_refs = changed_refs_of(p, &nodes, ctx.refs);
                     report_rebuild_feasibility(p, &changed_refs)?;
                 }
             }
         }
         eprintln!("[dry-run] {}", tally.summarize());
-        write_report_if_requested(opts, closure_root, closure_root, &nodes, None, &tally)?;
+        write_report_if_requested(
+            opts,
+            closure_root,
+            closure_root,
+            &nodes,
+            None,
+            ctx.refs,
+            &tally,
+        )?;
         return Ok(ReplaceResult {
             new_root: closure_root.to_path_buf(),
         });
@@ -261,8 +274,9 @@ pub fn replace(
                     let path = path.clone();
                     let use_rebuild = matches!(nodes[&path].category, Category::NeedsRebuild);
                     let resolved = &resolved;
+                    let refs = ctx.refs;
                     scope.spawn(move || {
-                        let outcome = build_recipe(&path, use_rebuild, resolved);
+                        let outcome = build_recipe(&path, use_rebuild, resolved, refs);
                         (path, outcome)
                     })
                 })
@@ -338,6 +352,7 @@ pub fn replace(
         &new_root,
         &nodes,
         Some(&resolved),
+        ctx.refs,
         &tally,
     )?;
     Ok(ReplaceResult { new_root })
@@ -354,6 +369,7 @@ fn write_report_if_requested(
     new_root: &Path,
     nodes: &HashMap<PathBuf, Node>,
     resolved: Option<&HashMap<PathBuf, PathBuf>>,
+    refs: &HashMap<PathBuf, Vec<PathBuf>>,
     tally: &Tally,
 ) -> Result<()> {
     let Some(dir) = opts.report else {
@@ -363,7 +379,7 @@ fn write_report_if_requested(
     // its own output directory and fails with a raw traceback if it's missing.
     std::fs::create_dir_all(dir)
         .with_context(|| format!("failed to create report directory {}", dir.display()))?;
-    let report_nodes = build_report_nodes(dir, opts.report_diff, nodes, resolved)?;
+    let report_nodes = build_report_nodes(dir, opts.report_diff, nodes, resolved, refs)?;
     let index = report::write(
         dir,
         closure_root,
@@ -381,6 +397,7 @@ fn build_report_nodes(
     report_diff: bool,
     nodes: &HashMap<PathBuf, Node>,
     resolved: Option<&HashMap<PathBuf, PathBuf>>,
+    refs: &HashMap<PathBuf, Vec<PathBuf>>,
 ) -> Result<Vec<report::ReportNode>> {
     // `Cutoff` is a deliberate decision worth showing (part of the graft's
     // story: "propagation stopped here, on purpose") — only `Unchanged`
@@ -413,7 +430,10 @@ fn build_report_nodes(
             Category::Cutoff => ("cutoff", "#6b7280", Some(path.clone()), false),
             Category::Unchanged => unreachable!("filtered out above"),
         };
-        let depends_on = store::references(path)?
+        let depends_on = refs
+            .get(path)
+            .cloned()
+            .unwrap_or_default()
             .into_iter()
             .filter(|r| included.contains(r))
             .collect();
@@ -507,6 +527,10 @@ struct Ctx<'a> {
     cutoffs: &'a HashSet<PathBuf>,
     force_rebuild: &'a HashSet<PathBuf>,
     force_graft: &'a HashSet<PathBuf>,
+    /// Direct references of every closure member, precomputed once via
+    /// `store::references_many` — a closure walk doing one `nix path-info`
+    /// subprocess per member doesn't scale to a real closure.
+    refs: &'a HashMap<PathBuf, Vec<PathBuf>>,
     nix_args: &'a [String],
     full_rebuild: bool,
 }
@@ -543,9 +567,9 @@ struct Node {
 /// Precedence mirrors [`replace`]'s doc comment: explicit > cutoff >
 /// default. Recursion stops at a cutoff without even inspecting its own
 /// references, matching what a cutoff means.
-fn classify(path: &Path, ctx: &Ctx, memo: &mut HashMap<PathBuf, Node>) -> Result<Node> {
+fn classify(path: &Path, ctx: &Ctx, memo: &mut HashMap<PathBuf, Node>) -> Node {
     if let Some(n) = memo.get(path) {
-        return Ok(n.clone());
+        return n.clone();
     }
     let node = if let Some(new) = ctx.explicit.get(path) {
         log::v(format!(
@@ -569,8 +593,9 @@ fn classify(path: &Path, ctx: &Ctx, memo: &mut HashMap<PathBuf, Node>) -> Result
     } else {
         let mut max_dep_level = 0;
         let mut any_changed = false;
-        for r in store::references(path)? {
-            let rn = classify(&r, ctx, memo)?;
+        let refs = ctx.refs.get(path).cloned().unwrap_or_default();
+        for r in refs {
+            let rn = classify(&r, ctx, memo);
             match &rn.category {
                 Category::Explicit(_) => any_changed = true,
                 Category::NeedsGraft | Category::NeedsRebuild => {
@@ -603,7 +628,7 @@ fn classify(path: &Path, ctx: &Ctx, memo: &mut HashMap<PathBuf, Node>) -> Result
         }
     };
     memo.insert(path.to_path_buf(), node.clone());
-    Ok(node)
+    node
 }
 
 fn tally_of(nodes: &HashMap<PathBuf, Node>) -> Tally {
@@ -623,16 +648,20 @@ fn tally_of(nodes: &HashMap<PathBuf, Node>) -> Tally {
 /// `path`'s direct references already classified as themselves changing —
 /// the identities `rebuild::unlocatable_dependencies` needs to check
 /// feasibility against, for `--dry-run`'s reporting.
-fn changed_refs_of(path: &Path, nodes: &HashMap<PathBuf, Node>) -> Result<Vec<PathBuf>> {
+fn changed_refs_of(
+    path: &Path,
+    nodes: &HashMap<PathBuf, Node>,
+    refs: &HashMap<PathBuf, Vec<PathBuf>>,
+) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    for r in store::references(path)? {
+    for r in refs.get(path).cloned().unwrap_or_default() {
         if let Some(n) = nodes.get(&r) {
             if !matches!(n.category, Category::Cutoff | Category::Unchanged) {
                 out.push(r);
             }
         }
     }
-    Ok(out)
+    out
 }
 
 /// Constructs `path`'s graft/rebuild recipe (a `.drv` plus output name, not
@@ -647,8 +676,12 @@ fn build_recipe(
     path: &Path,
     use_rebuild: bool,
     resolved: &HashMap<PathBuf, PathBuf>,
+    refs: &HashMap<PathBuf, Vec<PathBuf>>,
 ) -> Result<(PathBuf, String)> {
-    let all_refs: Vec<(PathBuf, PathBuf)> = store::references(path)?
+    let all_refs: Vec<(PathBuf, PathBuf)> = refs
+        .get(path)
+        .cloned()
+        .unwrap_or_default()
         .into_iter()
         .map(|r| {
             let new_r = resolved.get(&r).cloned().unwrap_or_else(|| r.clone());
@@ -672,27 +705,28 @@ fn would_change(
     path: &Path,
     explicit: &HashMap<PathBuf, PathBuf>,
     cutoffs: &HashSet<PathBuf>,
+    refs: &HashMap<PathBuf, Vec<PathBuf>>,
     memo: &mut HashMap<PathBuf, bool>,
-) -> Result<bool> {
+) -> bool {
     if let Some(v) = memo.get(path) {
-        return Ok(*v);
+        return *v;
     }
     if explicit.contains_key(path) {
         memo.insert(path.to_path_buf(), true);
-        return Ok(true);
+        return true;
     }
     if cutoffs.contains(path) {
         memo.insert(path.to_path_buf(), false);
-        return Ok(false);
+        return false;
     }
     let mut changed = false;
-    for r in store::references(path)? {
-        if would_change(&r, explicit, cutoffs, memo)? {
+    for r in refs.get(path).cloned().unwrap_or_default() {
+        if would_change(&r, explicit, cutoffs, refs, memo) {
             changed = true;
         }
     }
     memo.insert(path.to_path_buf(), changed);
-    Ok(changed)
+    changed
 }
 
 /// `path`'s direct references that would themselves change — the identities
@@ -702,15 +736,16 @@ fn changed_direct_refs(
     path: &Path,
     explicit: &HashMap<PathBuf, PathBuf>,
     cutoffs: &HashSet<PathBuf>,
+    refs: &HashMap<PathBuf, Vec<PathBuf>>,
     memo: &mut HashMap<PathBuf, bool>,
-) -> Result<Vec<PathBuf>> {
+) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    for r in store::references(path)? {
-        if would_change(&r, explicit, cutoffs, memo)? {
+    for r in refs.get(path).cloned().unwrap_or_default() {
+        if would_change(&r, explicit, cutoffs, refs, memo) {
             out.push(r);
         }
     }
-    Ok(out)
+    out
 }
 
 /// `--dry-run` reporting for a path that would use the rebuild strategy:
@@ -755,6 +790,7 @@ fn report_rebuild_feasibility(path: &Path, changed_refs: &[PathBuf]) -> Result<(
 fn interactive_select(
     closure_paths: &[PathBuf],
     explicit: &HashMap<PathBuf, PathBuf>,
+    refs: &HashMap<PathBuf, Vec<PathBuf>>,
     full_rebuild: bool,
     cutoffs: &mut HashSet<PathBuf>,
     force_rebuild: &mut HashSet<PathBuf>,
@@ -767,7 +803,7 @@ fn interactive_select(
         if explicit.contains_key(p) {
             continue;
         }
-        if would_change(p, explicit, cutoffs, &mut memo)? {
+        if would_change(p, explicit, cutoffs, refs, &mut memo) {
             affected.push(p.clone());
         }
     }
@@ -781,7 +817,7 @@ fn interactive_select(
     // explicit `rebuild` choice on a line that's known to fail.
     let mut rebuild_infeasible: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
     for p in &affected {
-        let changed_refs = changed_direct_refs(p, explicit, cutoffs, &mut memo)?;
+        let changed_refs = changed_direct_refs(p, explicit, cutoffs, refs, &mut memo);
         if changed_refs.is_empty() {
             continue;
         }
