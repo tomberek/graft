@@ -399,6 +399,48 @@ fn edit_registers_a_reference_the_edit_itself_introduces() {
 }
 
 #[test]
+fn replace_rewrites_a_bare_hash_reference_with_no_name_suffix() {
+    // bareHashConsumer embeds just dep's 32-character hash, nothing else
+    // -- Nix's own post-build scan matches that width (confirmed via a
+    // direct nix-store -q --references check below), narrower than our
+    // sed rule used to be.
+    let dep = nix_build("bareHashDep");
+    let dep_v2 = nix_build("bareHashDepV2");
+    let consumer = nix_build("bareHashConsumer");
+    assert!(
+        nix_store_references(&consumer).contains(&dep),
+        "fixture invariant: Nix's own scanner should already register the bare-hash reference"
+    );
+
+    let output = graft(&["replace", &consumer, "--override", &dep, &dep_v2], None);
+    assert!(
+        output.status.success(),
+        "graft replace on a bare-hash reference failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let grafted = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    assert_ne!(grafted, consumer);
+
+    let expected_hash = &dep_v2[dep_v2.rfind('/').map_or(0, |i| i + 1)..][..32];
+    let contents = fs::read_to_string(format!("{grafted}/bare-ref")).unwrap();
+    assert_eq!(
+        contents.trim(),
+        expected_hash,
+        "the bare hash should have been rewritten to the new one"
+    );
+
+    let refs = nix_store_references(&grafted);
+    assert!(
+        refs.contains(&dep_v2),
+        "the rewritten bare-hash reference should be registered: {refs:?}"
+    );
+    assert!(
+        !refs.contains(&dep),
+        "should no longer reference the old dependency: {refs:?}"
+    );
+}
+
+#[test]
 fn cutoff_stops_propagation_and_leaves_everything_above_it_untouched() {
     let leaf = nix_build("chainLeaf");
     let leaf_v2 = nix_build("chainLeafV2");

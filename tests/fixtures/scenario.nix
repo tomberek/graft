@@ -220,4 +220,15 @@ let pkgs = import <nixpkgs> {}; in rec {
     mkdir -p $out
     echo "nothing here yet" > $out/config
   '';
+
+  # Embeds just the 32-character hash of bareHashDep, with no "-name"
+  # suffix following — Nix's own post-build scan matches the bare hash
+  # alone (confirmed via nix-store -q --references on this fixture
+  # itself), narrower than our own sed rule used to.
+  bareHashDep = pkgs.writeShellScriptBin "bare-dep" ''echo "bare dep v1"'';
+  bareHashDepV2 = pkgs.writeShellScriptBin "bare-dep" ''echo "bare dep v2"'';
+  bareHashConsumer = pkgs.runCommand "bare-hash-consumer" { } ''
+    mkdir -p $out
+    echo "${builtins.substring 0 32 (baseNameOf "${bareHashDep}")}" > $out/bare-ref
+  '';
 }

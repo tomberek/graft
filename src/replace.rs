@@ -934,6 +934,17 @@ fn graft_recipe(path: &Path, all_refs: &[(PathBuf, PathBuf)]) -> Result<(PathBuf
             );
         }
         sed_expr.push_str(&format!("s|{old_b}|{new_b}|g;"));
+        // Nix's own post-build reference scan matches the bare 32-char
+        // hash alone, with no requirement that a `-name` suffix follows
+        // (confirmed directly in `references.cc`'s `search()`) — a
+        // reference embedded as just the hash would be missed by the
+        // full-basename rule above, since there's no "hash-name" run to
+        // match. Applied after it, in the same sed invocation, so this
+        // only ever catches what that rule's own replacements left
+        // behind — never double-substitutes the common case.
+        let old_hash = store::store_hash(old)?;
+        let new_hash = store::store_hash(new)?;
+        sed_expr.push_str(&format!("s|{old_hash}|{new_hash}|g;"));
     }
 
     let bash = derivation::tool_path("bash")?;
@@ -941,6 +952,7 @@ fn graft_recipe(path: &Path, all_refs: &[(PathBuf, PathBuf)]) -> Result<(PathBuf
     let nix_store = derivation::tool_path("nix-store")?;
     let name = store::store_name(path)?;
     let old_self = store::basename(path)?;
+    let old_self_hash = store::store_hash(path)?;
 
     // A self-reference (`path` embeds its own basename somewhere in its
     // content) can't be rewritten the same way as a real dependency: the
@@ -952,12 +964,14 @@ fn graft_recipe(path: &Path, all_refs: &[(PathBuf, PathBuf)]) -> Result<(PathBuf
     // handing the result to the builder as `$out` before the builder runs
     // — so there's no circularity to solve here, only a rewrite that has to
     // happen inside the sandbox, after `$out` is known, instead of in this
-    // format string. `${out##*/}` is bash's own basename (no external
-    // `basename` binary needed, so no extra sandboxed input to declare for
-    // it); a no-op second pass when `path` has no self-reference at all,
-    // the common case.
+    // format string. `${out##*/}`/`${new_self:0:32}` are bash's own
+    // basename/substring (no external binary needed, so no extra
+    // sandboxed input to declare for it); a no-op second pass when `path`
+    // has no self-reference at all, the common case. Same bare-hash
+    // widening as above applies here too.
     let script = format!(
-        "\"{ns}\" --dump \"{p}\" | \"{sed}\" '{expr}' | \"{sed}\" \"s|{old_self}|${{out##*/}}|g\" | \"{ns}\" --restore \"$out\"",
+        "new_self=\"${{out##*/}}\"; new_self_hash=\"${{new_self:0:32}}\"; \
+         \"{ns}\" --dump \"{p}\" | \"{sed}\" '{expr}' | \"{sed}\" \"s|{old_self}|$new_self|g;s|{old_self_hash}|$new_self_hash|g\" | \"{ns}\" --restore \"$out\"",
         ns = nix_store.display(),
         p = path.display(),
         sed = sed.display(),

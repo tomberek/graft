@@ -78,6 +78,18 @@ pub fn store_name(path: &Path) -> Result<String> {
     Ok(base[HASH_LEN + 1..].to_string())
 }
 
+/// Just the 32-character hash prefix of a store path basename, before the
+/// separating hyphen and name-version suffix — the same width Nix's own
+/// post-build reference scan matches (it never requires a name to
+/// follow), narrower than [`basename`]'s full `hash-name-version` string.
+pub fn store_hash(path: &Path) -> Result<String> {
+    let base = basename(path)?;
+    if base.len() <= HASH_LEN {
+        bail!("store path basename too short to contain a hash: {}", base);
+    }
+    Ok(base[..HASH_LEN].to_string())
+}
+
 fn run(cmd: &str, args: &[&str]) -> Result<String> {
     log::v(format!("running: {cmd} {}", args.join(" ")));
     let output = Command::new(cmd)

@@ -191,6 +191,33 @@ through, so there's nothing the modern CLI buys it here), with `inputSrcs` =
 not} ∪ {the store items providing bash/sed/nix-store}`. Realise it (`nix
 build <drv>^out`, forwarding any `nix_args`) and that's the grafted path.
 
+**Matching the same width Nix's own scanner does.** Read directly out of
+`~/nix/src/libstore/references.cc`'s `search()` function (the real
+implementation the daemon's post-build reference scan uses): it walks the
+raw byte stream looking for any 32-character run that's valid
+nix32-alphabet (`BaseNix32::lookupReverse`) *and* present in the candidate
+hash set — with no requirement that a `-` or a name follows.
+`StorePath::HashLen = 32` confirms the window size matches this tool's own
+`HASH_LEN`. The sed expression above originally substituted only the full
+`hash-name-version` string (`store::basename`), narrower than that: a
+reference embedded as *just* the 32-character hash with no name suffix
+following it (which Nix's own scanner explicitly still counts) would be
+missed and left as stale bytes in the grafted output — not a regression
+versus precedent (nixpkgs's `replaceDirectDependencies` has the identical
+narrower match), but still a real gap. Closed by appending one more `s///`
+per pair, `store::store_hash`-to-`store::store_hash` (just the 32-char
+prefix, not the full basename), applied *after* the full-basename rule in
+the same sed invocation — order matters here only in the sense that the
+full-basename rule already consumes the common case first, so the
+bare-hash rule only ever catches what that one's own replacements left
+behind, never double-substituting. The self-reference rule (above) gained
+the identical second clause for the same reason, computed from
+`${new_self:0:32}` rather than an external tool. Verified with a fixture
+that embeds just a bare hash, confirmed via a direct `nix-store -q
+--references` check that Nix's own scanner already registers it, then
+grafting and checking the hash was rewritten *and* the reference stayed
+registered afterward (`replace_rewrites_a_bare_hash_reference_with_no_name_suffix`).
+
 **Self-references.** A path can embed its own basename somewhere in its
 content (confirmed via Nix's own `-q --references`: a path that does this
 genuinely references itself, and the daemon's post-build scan records it)
@@ -205,10 +232,12 @@ from what the builder actually produces, and hands that already-decided
 value to the builder as `$out` *before* the builder runs. So the fix needs
 no coordination with the Rust side at all — a second `sed` pass, appended
 to the pipeline above, computed *inside the sandbox* after `$out` is
-known: `sed "s|<old-self-basename>|${out##*/}|g"` (bash's own basename via
-parameter expansion, not an external binary, so no extra sandboxed input
-to declare for it). A no-op when `path` has no self-reference, the common
-case. Verified by grafting a fixture that embeds `$out` in its own content
+known: `sed "s|<old-self-basename>|${out##*/}|g;s|<old-self-hash>|${new_self:0:32}|g"`
+(bash's own basename/substring via parameter expansion, not an external
+binary, so no extra sandboxed input to declare for it; the second clause
+is the same bare-hash widening the dependency rules above also needed). A
+no-op when `path` has no self-reference, the common case. Verified by
+grafting a fixture that embeds `$out` in its own content
 independent of the dependency actually being replaced
 (`replace_rewrites_a_self_reference_to_the_grafted_result_s_own_path`):
 before this, the embedded text kept naming the *pre-graft* hash and the
@@ -425,36 +454,6 @@ into `replace`.
   rewrite it anyway. Store path basenames are high-entropy 32-character
   hashes, so collisions are astronomically unlikely, but this is a
   fundamentally unverified rewrite, not a semantically-aware one.
-- **`sed` matches the full basename; Nix's own scanner matches the bare
-  hash alone — narrower than it needs to be.** Read directly out of
-  `~/nix/src/libstore/references.cc`'s `search()` function (the real
-  implementation the daemon's post-build reference scan uses): it walks the
-  raw byte stream looking for any 32-character run that's valid
-  nix32-alphabet (`BaseNix32::lookupReverse`) *and* present in the candidate
-  hash set — with no requirement that a `-` or a name follows.
-  `StorePath::HashLen = 32` confirms the window size matches this tool's own
-  `HASH_LEN`. Two things this confirms, one
-  reassuring and one not: the scan operates on the *printable base32 text*
-  of the hash, not some other binary encoding, so `sed`'s literal-string
-  substitution is matching the right representation and is naturally
-  binary-safe (the scanner itself is a raw byte-level `std::string_view`
-  walk with no line/NUL handling at all, carrying a `tail` buffer
-  specifically so a hash split across two read chunks is still found — the
-  exact same reason `graft_path`'s dump/sed/restore pipeline never had a
-  binary-safety problem worth expecting). But `graft_path`'s `sed_expr`
-  substitutes the full `hash-name-version` string
-  (`store::basename`), not the bare hash — so a reference embedded as *just*
-  the 32-character hash with no name suffix following it (which Nix's own
-  scanner explicitly still counts, per the code above) would be missed by
-  our rewrite and left as stale bytes in the grafted output. Not a
-  regression versus precedent — nixpkgs's `replaceDirectDependencies` has
-  the identical narrower match — but worth being precise about: we are not
-  matching "the same hashes Nix itself would look for" in full generality,
-  only the common case where the full basename string appears.
-  `RewritingSink`'s own `assert(from.size() == to.size())` (used internally
-  by Nix for self-reference masking) is independent confirmation that this
-  tool's equal-length constraint is the same invariant Nix's own C++
-  rewriting relies on, not something specific to this prototype.
 - **Verified against real compiled binary content, not just text.** Every
   other fixture in `tests/fixtures/scenario.nix` is a shell script or plain
   text — `writeShellScriptBin`/`writeTextFile`/`runCommand` with no compiler
