@@ -108,18 +108,34 @@ fn own_output(path: &Path) -> Option<(PathBuf, String)> {
 /// whether it found and changed anything; the caller treats "found nothing"
 /// as a hard failure rather than proceeding with an unmodified derivation.
 ///
-/// Checks all of the following, not just the first match:
+/// Checks all of the following, not just the first match — a dependency
+/// can be declared *and* separately embedded as text, and both sites need
+/// fixing: a derivation whose `env` echoes a `.drv` input the daemon's own
+/// post-build scan still matches by its bare hash alone would otherwise
+/// have its `inputs.drvs` entry correctly swapped while that `env` string
+/// silently keeps saying the old hash — found by actually running exactly
+/// that case, not by reasoning about the code: the rebuilt output's
+/// content was stale *and* its registered references were empty (the new
+/// dependency's hash never appeared in the output text to be scanned, and
+/// the old dependency was no longer a declared input to be scanned
+/// against), rather than erroring the way an unreachable dependency does.
 /// 1. `inputs.drvs`: removes just `old`'s output name from its entry's
 ///    `outputs` list (a derivation can depend on more than one output of
 ///    the same input), dropping the entry if it becomes empty. Adds `new`'s
 ///    output name to its own entry, or to `inputs.srcs` if it has no deriver.
 /// 2. `inputs.srcs`: a plain-store-path entry matching `old`'s basename.
-/// 3. `env`/`args` strings containing `old`'s full path or basename.
+/// 3. `env`/`args` strings containing `old`'s full path, full basename, or
+///    bare 32-character hash alone — the same width Nix's own post-build
+///    scan matches (see `store::store_hash`), narrower than the full
+///    basename, so a reference embedded as just the hash (with no `-name`
+///    suffix) is still caught.
 fn substitute_dependency(inner: &mut Value, old: &Path, new: &Path) -> Result<bool> {
     let old_base = store::basename(old)?;
     let new_base = store::basename(new)?;
     let old_full = old.to_string_lossy().into_owned();
     let new_full = new.to_string_lossy().into_owned();
+    let old_hash = store::store_hash(old)?;
+    let new_hash = store::store_hash(new)?;
     let mut found = false;
 
     if let Some((old_drv, old_output_name)) = own_output(old) {
@@ -199,11 +215,12 @@ fn substitute_dependency(inner: &mut Value, old: &Path, new: &Path) -> Result<bo
     if let Some(env) = inner.get_mut("env").and_then(|e| e.as_object_mut()) {
         for (k, v) in env.iter_mut() {
             if let Some(s) = v.as_str() {
-                if s.contains(&old_full) || s.contains(old_base.as_str()) {
+                if s.contains(&old_full) || s.contains(old_base.as_str()) || s.contains(&old_hash) {
                     log::v(format!("  env.{k}: substituted {old_base} -> {new_base}"));
                     *v = Value::String(
                         s.replace(&old_full, &new_full)
-                            .replace(old_base.as_str(), new_base.as_str()),
+                            .replace(old_base.as_str(), new_base.as_str())
+                            .replace(&old_hash, &new_hash),
                     );
                     found = true;
                 }
@@ -213,9 +230,13 @@ fn substitute_dependency(inner: &mut Value, old: &Path, new: &Path) -> Result<bo
     if let Some(args) = inner.get_mut("args").and_then(|a| a.as_array_mut()) {
         for (i, v) in args.iter_mut().enumerate() {
             if let Some(s) = v.as_str() {
-                if s.contains(&old_full) {
+                if s.contains(&old_full) || s.contains(old_base.as_str()) || s.contains(&old_hash) {
                     log::v(format!("  args[{i}]: substituted {old_base} -> {new_base}"));
-                    *v = Value::String(s.replace(&old_full, &new_full));
+                    *v = Value::String(
+                        s.replace(&old_full, &new_full)
+                            .replace(old_base.as_str(), new_base.as_str())
+                            .replace(&old_hash, &new_hash),
+                    );
                     found = true;
                 }
             }

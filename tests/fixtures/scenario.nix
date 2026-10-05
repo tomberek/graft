@@ -263,4 +263,22 @@ let pkgs = import <nixpkgs> {}; in rec {
     ln -s ${nameMatchDupA} $out/a-link
     ln -s ${nameMatchDupB} $out/b-link
   '';
+
+  # The dependency is declared (so it's a genuine .drv input, findable in
+  # inputs.drvs) but only its bare 32-char hash — no "-name" suffix — is
+  # embedded in the derivation's own `env`, the same width Nix's own
+  # post-build scan matches (which is what makes it a genuine runtime
+  # reference of the output too, so --rebuild even attempts this node).
+  # --rebuild's own structural substitution used to only check for the
+  # full path or full basename inside an env/args string, missing this.
+  rebuildBareHashDep =
+    pkgs.writeShellScriptBin "rebuild-bare-dep" ''echo "rebuild bare dep v1"'';
+  rebuildBareHashDepV2 =
+    pkgs.writeShellScriptBin "rebuild-bare-dep" ''echo "rebuild bare dep v2"'';
+  rebuildBareHashConsumer = pkgs.runCommand "rebuild-bare-hash-consumer"
+    { bareHash = builtins.substring 0 32 (baseNameOf "${rebuildBareHashDep}"); }
+    ''
+      mkdir -p $out
+      echo "$bareHash" > $out/bare-ref
+    '';
 }

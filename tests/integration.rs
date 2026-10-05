@@ -688,6 +688,67 @@ fn rebuild_fails_loudly_when_a_reference_is_only_embedded_transitively() {
 }
 
 #[test]
+fn rebuild_substitutes_a_dependency_embedded_only_as_a_bare_hash_in_env() {
+    // `rebuildBareHashConsumer` declares its dependency as a real .drv
+    // input (so inputs.drvs matching alone used to report `found = true`)
+    // but only embeds its bare 32-char hash (no `-name` suffix) in `env`,
+    // which the old substring check (full path or full basename only)
+    // never matched — silently leaving `env` stale and producing a rebuilt
+    // output whose registered references didn't match what it actually
+    // declared as an input.
+    let dep = nix_build("rebuildBareHashDep");
+    let dep_v2 = nix_build("rebuildBareHashDepV2");
+    let consumer = nix_build("rebuildBareHashConsumer");
+
+    let output = graft(
+        &[
+            "replace",
+            &consumer,
+            "--override",
+            &dep,
+            &dep_v2,
+            "--rebuild",
+        ],
+        None,
+    );
+    assert!(
+        output.status.success(),
+        "graft replace --rebuild failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rebuilt = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    assert_ne!(rebuilt, consumer);
+
+    let hash_of = |p: &str| -> String {
+        Path::new(p).file_name().unwrap().to_str().unwrap()[..32].to_string()
+    };
+    let new_hash = hash_of(&dep_v2);
+    let old_hash = hash_of(&dep);
+    let contents = fs::read_to_string(format!("{rebuilt}/bare-ref"))
+        .unwrap()
+        .trim()
+        .to_string();
+    assert_eq!(
+        contents, new_hash,
+        "env.bareHash should have been substituted to the new hash, not left stale"
+    );
+
+    // The rebuilt output must reference exactly the new dependency — not
+    // nothing (what the bug produced: the new hash never made it into the
+    // content to be scanned, and the old dependency was no longer a
+    // declared input to be scanned against) and not the old one.
+    let refs = nix_store_references(&rebuilt);
+    assert!(
+        refs.iter().any(|r| r.contains(new_hash.as_str())),
+        "rebuilt output should reference the new dependency: {refs:?}"
+    );
+    assert!(
+        !refs.iter().any(|r| r.contains(old_hash.as_str())),
+        "rebuilt output should not still reference the old dependency: {refs:?}"
+    );
+}
+
+#[test]
 fn rebuild_supports_a_multi_output_derivation() {
     // `multiOut` produces two outputs (`out`, `extra`); `multiConsumer`
     // depends specifically on `extra`.

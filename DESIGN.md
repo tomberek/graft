@@ -512,12 +512,13 @@ in this suite never shows one.
 - **`--rebuild` can still fail to find a substitution point, though now it
   says so.** It only recognizes a dependency as a whole `inputs.drvs`/
   `inputs.srcs` entry (matched by output name, see §6) or a literal
-  substring of an `env`/`args` string. A dependency referenced some other
-  way — most concretely, embedded only *transitively* through another
-  declared input's own build output — won't be found, and `rebuild_path`
-  now errors instead of silently rebuilding an unmodified derivation (see
-  §6). Multi-output derivations are fully supported as of §6, which used to
-  be a separate, harder limitation here.
+  substring (full path, full basename, or bare hash, see §21) of an
+  `env`/`args` string. A dependency referenced some other way — most
+  concretely, embedded only *transitively* through another declared
+  input's own build output — won't be found, and `rebuild_path` now errors
+  instead of silently rebuilding an unmodified derivation (see §6).
+  Multi-output derivations are fully supported as of §6, which used to be a
+  separate, harder limitation here.
 - **No substituter trust story.** Every grafted or rebuilt path here was
   produced locally; no binary cache has ever seen it, so there's nothing that
   will substitute it elsewhere, and no mechanism here to sign or publish one.
@@ -1351,3 +1352,52 @@ script for `bash`/`zsh`/`fish`/`elvish`/`powershell` to stdout. No new
 state or behavior to maintain: every flag/subcommand completion stays
 correct automatically as the CLI itself changes, since it's generated
 from the live `Cli::command()`, not a hand-maintained script.
+
+## 21. A silent `--rebuild` correctness bug, not just a missed match
+
+§6 fixed `--rebuild` *failing loudly* when a changed dependency isn't
+findable in a node's `.drv` structure. Shrinking that gap further — by
+widening what counts as "findable" — turned up something worse than a
+false negative: a case where `substitute_dependency` reported success
+while actually leaving the derivation half-substituted.
+
+`substitute_dependency` checks four independent sites (`inputs.drvs`,
+`inputs.srcs`, `env`, `args`) and returns whether *any* of them matched.
+That's fine when a dependency only lives at one site — but a dependency
+can genuinely be both: declared as a real `.drv` input (so
+`inputs.drvs` matches) *and* separately echoed as text in `env` (e.g. a
+build script that writes out a hash it was handed as a build input).
+Found by actually constructing exactly that case
+(`rebuildBareHashConsumer`: a real `.drv` input whose bare 32-character
+hash — no `-name` suffix — is also written into `env.bareHash` and
+copied into the output): the old `env`/`args` check only matched a
+dependency's full path or full basename as a substring, never the bare
+hash alone (the same width gap §4's `graft_recipe` already had and fixed
+for the graft path — see `store::store_hash`'s doc comment — just never
+ported over to `--rebuild`'s structural check). So `inputs.drvs`
+correctly swapped the declared input, `found` became `true` from that
+alone, and the function returned success — while `env.bareHash` silently
+kept the *old* hash.
+
+The result wasn't just stale content. The rebuilt output's `env.bareHash`
+still said the old hash, so the new dependency's hash never appeared
+anywhere in the output for Nix's post-build scan to find — and the old
+dependency was no longer a declared input at all (its `inputs.drvs` entry
+had just been removed), so even though its hash *did* still appear in the
+output text, it wasn't a scan candidate anymore either. `nix-store -q
+--references` on the rebuilt result came back completely empty: a store
+path that claims (via `inputs.drvs`) to depend on the new dependency but
+registers no reference to it, and whose content still visibly names the
+old one. Exactly the kind of closure inconsistency this whole tool exists
+to avoid introducing.
+
+The fix widens the `env`/`args` checks to also match (and replace) the
+bare hash, same as `env`/`args` already did for full path/basename. It
+doesn't change the four-site structure or the "any match counts as found"
+contract — that contract is actually fine, since every one of the sites
+that *does* match genuinely gets fixed; the bug was specifically that one
+site (`env`'s bare-hash form) wasn't recognized as a match at all, not
+that finding-at-one-site should've been insufficient. Verified against
+the same fixture end-to-end: `env.bareHash` now carries the new hash, and
+the rebuilt output's only reference is to the new dependency — not empty,
+and not the old one.
