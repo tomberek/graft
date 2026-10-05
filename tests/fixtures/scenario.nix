@@ -244,4 +244,23 @@ let pkgs = import <nixpkgs> {}; in rec {
     echo 'int f(void) { return 2; }' > lib.c
     cc -shared -fPIC -Wl,-soname,libfoo.so.2 -o $out/lib/libfoo.so.1 lib.c
   '';
+
+  # --override-name / `graft find`: a store path with a name unique in its
+  # own consumer's closure, so a bare-name query resolves unambiguously.
+  nameMatchDep = pkgs.writeShellScriptBin "namematch" ''echo "namematch v1"'';
+  nameMatchDepV2 = pkgs.writeShellScriptBin "namematch" ''echo "namematch v2"'';
+  nameMatchConsumer = pkgs.writeShellScriptBin "namematch-consumer" ''
+    ${nameMatchDep}/bin/namematch
+  '';
+
+  # Two distinct store paths sharing the same package name, both
+  # referenced (via symlink) by one consumer — --override-name must refuse
+  # rather than guess which one; `graft find` must list both.
+  nameMatchDupA = pkgs.writeShellScriptBin "dupname" ''echo "dup a"'';
+  nameMatchDupB = pkgs.writeShellScriptBin "dupname" ''echo "dup b"'';
+  nameMatchDupConsumer = pkgs.runCommand "dupname-consumer" { } ''
+    mkdir -p $out
+    ln -s ${nameMatchDupA} $out/a-link
+    ln -s ${nameMatchDupB} $out/b-link
+  '';
 }

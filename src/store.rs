@@ -90,6 +90,47 @@ pub fn store_hash(path: &Path) -> Result<String> {
     Ok(base[..HASH_LEN].to_string())
 }
 
+/// Splits a `name-version` string the way Nix's own `parseDrvName` does
+/// (`libutil/names.cc`): the version starts at the first `-` immediately
+/// followed by a character that isn't a letter. Nix folds a non-`out`
+/// output's suffix into the "version" half under this same rule (e.g.
+/// `openssl-3.2.1-dev` splits to `("openssl", "3.2.1-dev")`, the same way
+/// `nix-env -q` already displays it) — a query that includes that suffix
+/// disambiguates a specific output without needing a separate concept.
+pub fn parse_name(name_version: &str) -> (String, String) {
+    let bytes = name_version.as_bytes();
+    for i in 0..bytes.len() {
+        if bytes[i] == b'-' && i + 1 < bytes.len() && !bytes[i + 1].is_ascii_alphabetic() {
+            return (
+                name_version[..i].to_string(),
+                name_version[i + 1..].to_string(),
+            );
+        }
+    }
+    (name_version.to_string(), String::new())
+}
+
+/// Store paths in `closure` whose `(pname, version)` ([`parse_name`])
+/// matches `query` — a bare `pname` matches any version (ambiguous unless
+/// exactly one is present in `closure`), while a `pname-version` query
+/// matches only that one.
+pub fn find_by_name(closure: &[PathBuf], query: &str) -> Result<Vec<PathBuf>> {
+    let (query_name, query_version) = parse_name(query);
+    let mut matches = Vec::new();
+    for path in closure {
+        let (name, version) = parse_name(&store_name(path)?);
+        if name != query_name {
+            continue;
+        }
+        if !query_version.is_empty() && version != query_version {
+            continue;
+        }
+        matches.push(path.clone());
+    }
+    matches.sort();
+    Ok(matches)
+}
+
 fn run(cmd: &str, args: &[&str]) -> Result<String> {
     log::v(format!("running: {cmd} {}", args.join(" ")));
     let output = Command::new(cmd)

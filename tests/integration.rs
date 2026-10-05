@@ -1405,6 +1405,110 @@ fn replace_warns_when_old_is_not_in_the_closure() {
 }
 
 #[test]
+fn override_name_resolves_a_unique_package_name_match() {
+    let consumer = nix_build("nameMatchConsumer");
+    let new = nix_build("nameMatchDepV2");
+
+    let output = graft(
+        &["replace", &consumer, "--override-name", "namematch", &new],
+        None,
+    );
+    assert!(
+        output.status.success(),
+        "graft replace --override-name failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let grafted = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+    let run = Command::new(format!("{grafted}/bin/namematch-consumer"))
+        .output()
+        .expect("failed to run grafted consumer");
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "namematch v2");
+
+    let refs = nix_store_references(&grafted);
+    assert!(
+        refs.contains(&new),
+        "grafted consumer should reference the new dependency: {refs:?}"
+    );
+}
+
+#[test]
+fn override_name_refuses_an_ambiguous_match() {
+    let consumer = nix_build("nameMatchDupConsumer");
+
+    let output = graft(
+        &[
+            "replace",
+            &consumer,
+            "--override-name",
+            "dupname",
+            &consumer,
+        ],
+        None,
+    );
+    assert!(
+        !output.status.success(),
+        "ambiguous --override-name should fail, not guess"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("ambiguous") && stderr.contains("dupname"),
+        "expected an ambiguity error naming every candidate, got: {stderr}"
+    );
+    // Both distinct candidates must be listed, not just a count.
+    let dupname_lines = stderr
+        .lines()
+        .filter(|l| l.trim_start().starts_with("/nix/store/") && l.contains("dupname"))
+        .count();
+    assert_eq!(
+        dupname_lines, 2,
+        "expected both ambiguous candidates listed, got: {stderr}"
+    );
+}
+
+#[test]
+fn find_lists_every_distinct_match_with_a_consumer() {
+    let consumer = nix_build("nameMatchDupConsumer");
+
+    let output = graft(&["find", &consumer, "dupname"], None);
+    assert!(
+        output.status.success(),
+        "graft find failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines: Vec<&str> = stdout.lines().filter(|l| !l.trim().is_empty()).collect();
+    assert_eq!(
+        lines.len(),
+        2,
+        "expected exactly two distinct matches, got: {stdout}"
+    );
+    for line in &lines {
+        assert!(
+            line.contains("dupname") && line.contains(&consumer),
+            "expected each match to name itself and its consumer: {line}"
+        );
+    }
+}
+
+#[test]
+fn find_reports_no_matches_without_erroring() {
+    let consumer = nix_build("nameMatchConsumer");
+
+    let output = graft(&["find", &consumer, "not-a-real-package-name"], None);
+    assert!(
+        output.status.success(),
+        "graft find with no matches should still exit cleanly: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("no matches"),
+        "expected a no-matches message, got: {stdout}"
+    );
+}
+
+#[test]
 fn replace_out_link_creates_a_gc_root_symlink() {
     let old = nix_build("oldDep");
     let new = nix_build("newDep");

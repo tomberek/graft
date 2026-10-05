@@ -127,6 +127,32 @@ you pick one.
 — `readlink -f` resolves that, the same way you'd find it to inspect it
 manually.)
 
+## Replacing by package name
+
+`--override` needs an exact store path for `old` — fine when you already
+built the installable you're replacing, less convenient when you just want
+to say "whatever `openssl` is in this closure." `--override-name <name>
+<new>` resolves `name` by searching the closure instead:
+
+```
+graft replace .#myImage --override-name openssl nixpkgs#openssl_3_2
+```
+
+Succeeds only if exactly one path in the closure matches. If more than one
+does (two genuinely different versions coexisting, say), it refuses and
+lists every candidate rather than guessing which one you meant — pick one
+with an exact `--override`, or narrow the query with a version
+(`openssl-3.2.1`, matching what `nix-env -q` would show you for a non-`out`
+output too, e.g. `openssl-3.2.1-dev`).
+
+`graft find <closure-root> <name>` runs the same search read-only, so you
+can see what a query would resolve to (or how it's ambiguous) first:
+
+```
+$ graft find .#myImage openssl
+/nix/store/9f3a...-openssl-3.2.1  (consumed by /nix/store/...-curl-8.9.0)
+```
+
 ## Flags
 
 Strategy — how propagation above a change is handled:

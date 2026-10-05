@@ -521,11 +521,6 @@ in this suite never shows one.
 - **No substituter trust story.** Every grafted or rebuilt path here was
   produced locally; no binary cache has ever seen it, so there's nothing that
   will substitute it elsewhere, and no mechanism here to sign or publish one.
-- **O(n) `nix path-info` subprocess calls**, one per closure member for
-  its `references`, rather than nixpkgs's single bulk
-  `exportReferencesGraph`-style query. Fine for a prototype; a real
-  implementation would batch this (e.g. via the Nix daemon's worker protocol
-  directly, or `nix-store --query --graph`).
 - **The `nix derivation add` output-path retry loop (§4) is inherently
   fragile** — it depends on the exact wording of two specific Nix error
   messages, shared by `replace`'s synthetic-derivation construction and by
@@ -1269,3 +1264,65 @@ independent sibling outputs with no reference between them, so the only
 way to find `extra`'s rebuilt path for inspection is the `-v` log line
 reporting it directly, not anything reachable by walking references from
 `out`.
+
+## 17. Batching `nix path-info` for the whole closure, not one call per path
+
+§5 used to list this as a known caveat: `classify`/`would_change` recursed
+via a single-path `store::references(path)`, one `nix path-info --json`
+subprocess per closure member. Fine for the hand-built fixtures this tool
+tests against (dozens of paths), not for a real NixOS closure (thousands).
+
+`nix path-info --json` already accepts more than one installable and
+returns one JSON object keyed by path, so there was no actual need to call
+it more than once per `replace()` invocation — this wasn't a case of
+needing a different Nix primitive (the `exportReferencesGraph`-style bulk
+query §5 used to speculate about), just calling the existing one correctly.
+`store::references_many(paths: &[PathBuf]) -> Result<HashMap<PathBuf,
+Vec<PathBuf>>>` replaced the single-path version, computed once in
+`replace()` right after the closure itself, and threaded through as a
+precomputed map lookup everywhere the old code called `store::references`
+live: `classify`, `changed_refs_of`, `build_recipe`, `would_change`,
+`changed_direct_refs`, `interactive_select`, `build_report_nodes`. Several
+of these had no other fallible operation left once the live subprocess call
+was removed, so they dropped their now-unnecessary `Result`/`?` plumbing
+too — a sign the change was a pure hoist, not a behavior change.
+
+## 18. Replacing by package name: `--override-name` and `graft find`
+
+§8 let `--override` accept installables instead of requiring a store path
+already in hand, but that still means knowing *which* installable produces
+the exact thing already in the target closure. Guix users never see a hash
+at all — grafting there is driven by a `replacement` field on a package.
+`--override-name <name> <new>` is the ergonomic next step: `name` is a bare
+package name (or `name-version`), resolved by searching the closure itself.
+
+The unsafe version of this feature would be "match by name, replace every
+match" — wrong whenever a closure genuinely contains two different things
+under the same name (two incompatible versions coexisting on purpose, most
+concretely), since replacing both with the same `new` would silently apply
+a change to something that was never asked for. So resolution is scoped
+tightly: `store::find_by_name(closure, query)` matches on `(pname,
+version)`, parsed from a store path's `name-version` suffix the same way
+Nix's own `parseDrvName` does (`store::parse_name` — the version starts at
+the first `-` immediately followed by a non-letter; this is also where Nix
+folds a non-`out` output's suffix into the "version" half, e.g.
+`openssl-3.2.1-dev` parses to `("openssl", "3.2.1-dev")`, so a query that
+includes the suffix disambiguates a specific output for free, no separate
+concept needed). `resolve_override_name` (`main.rs`) requires *exactly one*
+distinct path to match; zero or more than one is a hard refusal, printing
+every candidate store path rather than guessing — the same shape as the
+`^*`-pairing warn-and-skip in §16, except here ambiguity is a correctness
+risk (which one did you mean?) rather than a "safe to just not touch it"
+case, so it fails instead of warning.
+
+`graft find <closure-root> <name>` is the read-only counterpart — same
+`find_by_name` search, printing each match with one direct consumer (found
+via the same `references_many` map §17 introduced, inverted) so "which
+occurrence is this" has an answer before committing to an override. Zero
+risk, since it only searches and prints.
+
+Verified against `nameMatchDep`/`nameMatchDepV2`/`nameMatchConsumer` (a
+single unambiguous match, successfully overridden and run) and
+`nameMatchDupA`/`nameMatchDupB`/`nameMatchDupConsumer` (two distinct store
+paths sharing one name, both referenced by the same consumer via symlink —
+`--override-name` must refuse listing both, `graft find` must list both).

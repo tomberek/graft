@@ -16,6 +16,7 @@ mod store;
 use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
 use replace::ReplaceOptions;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// Guix-style graft/rewrite prototype for the Nix store.
@@ -209,6 +210,14 @@ struct TransformArgs {
     /// repeated; may be combined with --edit.
     #[arg(long = "override", num_args = 2, value_names = ["old", "new"])]
     overrides: Vec<String>,
+    /// Like --override, but `name` is a bare package name (or
+    /// `name-version`) instead of an exact store path — resolved by
+    /// searching the closure, the same matching `graft find` uses. Refuses
+    /// (printing every candidate) if more than one distinct path matches;
+    /// pass a `name-version` query or fall back to an exact --override to
+    /// disambiguate. May be repeated; may be combined with --override/--edit.
+    #[arg(long = "override-name", num_args = 2, value_names = ["name", "new"])]
+    override_names: Vec<String>,
     /// Edit `path` by hand and graft the result up through the closure —
     /// what kind of edit depends entirely on what `path` turns out to be,
     /// detected automatically: a `.nix` file sitting on disk means editing
@@ -225,6 +234,17 @@ struct TransformArgs {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Search the closure of <closure-root> for a path matching <name> —
+    /// read-only, same matching `--override-name` uses, so you can see
+    /// what it would resolve to (or why it's ambiguous) before committing
+    /// to an override.
+    Find {
+        /// A store path, flake reference, `.drv` path, or `file.nix[#attr]`
+        /// installable — built automatically if not already realized.
+        closure_root: String,
+        /// Package name (or `name-version`) to search for.
+        name: String,
+    },
     /// Replace, edit, or rebuild one or more things, grafting every result
     /// up through the closure rooted at <closure-root> in a single pass.
     Replace {
@@ -275,11 +295,24 @@ fn collect_pairs(
     nix_args: &[String],
     transforms: TransformArgs,
 ) -> Result<Vec<(PathBuf, PathBuf)>> {
-    let TransformArgs { overrides, edit } = transforms;
+    let TransformArgs {
+        overrides,
+        override_names,
+        edit,
+    } = transforms;
     let mut pairs = Vec::new();
     let mut closure_cache: Option<Vec<PathBuf>> = None;
     for pair in overrides.chunks(2) {
         pairs.extend(resolve_override(&pair[0], &pair[1], nix_args)?);
+    }
+    for pair in override_names.chunks(2) {
+        pairs.push(resolve_override_name(
+            &pair[0],
+            &pair[1],
+            closure_root,
+            nix_args,
+            &mut closure_cache,
+        )?);
     }
     for pair in edit.chunks(2) {
         pairs.extend(detect_edit(
@@ -328,6 +361,44 @@ fn resolve_override(old: &str, new: &str, nix_args: &[String]) -> Result<Vec<(Pa
         }
     }
     Ok(pairs)
+}
+
+/// Resolves `--override-name <name> <new>` to one exact `(old, new)` pair by
+/// searching the closure for a path matching `name` (see
+/// [`store::find_by_name`]) — succeeds only if exactly one distinct path
+/// matches; refuses (listing every candidate) otherwise, since silently
+/// picking among genuinely different packages/versions would be a much
+/// bigger, likely-wrong change than the caller asked for.
+fn resolve_override_name(
+    name: &str,
+    new: &str,
+    closure_root: &Path,
+    nix_args: &[String],
+    closure_cache: &mut Option<Vec<PathBuf>>,
+) -> Result<(PathBuf, PathBuf)> {
+    let closure = ensure_closure(closure_cache, closure_root)?;
+    let matches = store::find_by_name(closure, name)?;
+    match matches.as_slice() {
+        [] => bail!(
+            "--override-name {name} {new}: no path in the closure of {} matches `{name}`",
+            closure_root.display()
+        ),
+        [one] => Ok((one.clone(), installable::resolve(new, nix_args)?)),
+        many => {
+            let list = many
+                .iter()
+                .map(|p| format!("  {}", p.display()))
+                .collect::<Vec<_>>()
+                .join("\n");
+            bail!(
+                "--override-name {name} {new}: ambiguous, {} paths in the closure of {} match `{name}`:\n{list}\n\
+                 pick one with an exact --override <old> {new}, or narrow the query with a version \
+                 (e.g. `{name}-<version>`)",
+                many.len(),
+                closure_root.display()
+            );
+        }
+    }
 }
 
 fn ensure_closure<'a>(
@@ -432,6 +503,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     log::set_verbose(cli.verbose);
     let (result, out_link, nix_args) = match cli.command {
+        Cmd::Find { closure_root, name } => return run_find(&closure_root, &name),
         Cmd::Replace {
             closure_root,
             transforms,
@@ -482,6 +554,39 @@ fn main() -> Result<()> {
         provenance::record(&link, &result.new_root)?;
     }
     println!("{}", result.new_root.display());
+    Ok(())
+}
+
+/// `graft find`: lists every path in the closure matching `name` (same
+/// matching `--override-name` uses), each with one direct consumer so
+/// "which occurrence is this" has an answer — purely read-only.
+fn run_find(closure_root: &str, name: &str) -> Result<()> {
+    let closure_root = installable::resolve(closure_root, &[])?;
+    let closure = store::closure(&closure_root)?;
+    let matches = store::find_by_name(&closure, name)?;
+    if matches.is_empty() {
+        println!(
+            "no matches for `{name}` in the closure of {}",
+            closure_root.display()
+        );
+        return Ok(());
+    }
+    let refs = store::references_many(&closure)?;
+    let mut consumer_of: HashMap<&PathBuf, &PathBuf> = HashMap::new();
+    for (p, rs) in &refs {
+        for r in rs {
+            consumer_of.entry(r).or_insert(p);
+        }
+    }
+    for m in &matches {
+        match consumer_of.get(m) {
+            Some(consumer) => println!("{}  (consumed by {})", m.display(), consumer.display()),
+            None => println!(
+                "{}  (not directly referenced by anything else in this closure)",
+                m.display()
+            ),
+        }
+    }
     Ok(())
 }
 
