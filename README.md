@@ -1,7 +1,10 @@
 # graft
 
-A Guix-style graft/rewrite tool for the Nix store: patch a dependency into
-an already-built closure without rebuilding everything above it.
+A Guix-style graft/rewrite tool for the Nix store: rewrite one dependency
+deep in an already-built closure and have everything built on top of it
+*replayed* onto the new base — the same shape as `git rebase`, applied to
+a store closure instead of a commit history, without actually rebuilding
+anything from scratch.
 
 Nix has the same low-level technique in nixpkgs
 ([`replaceDependencies`](https://github.com/NixOS/nixpkgs/blob/master/pkgs/build-support/replace-dependencies.nix)),
@@ -35,12 +38,16 @@ nix develop -c cargo test
 graft replace <closure-root> --override <old> <new>
 ```
 
-Walks the closure rooted at `<closure-root>` bottom-up and, for every path
-that transitively references `<old>`, swaps it for `<new>` — a blind but
-fast NAR byte-substitution, the same technique Guix and nixpkgs use. Paths
-with no data dependency on each other graft concurrently rather than one
-at a time. Reports each one as it happens, plus a closing summary in the
-same spirit as Guix's own grafting output:
+Walks the closure rooted at `<closure-root>` bottom-up and replays every
+path that transitively depends on `<old>` onto `<new>` instead — the same
+thing `git rebase` does to every commit after the one you rewrote, except
+each "commit" here is a store path, and replaying it means a blind but
+fast NAR byte-substitution (the same technique Guix and nixpkgs use)
+rather than actually recompiling it. Anything that never depended on
+`<old>` is left alone entirely, same as commits before the rebase point
+never move. Paths with no data dependency on each other graft concurrently
+rather than one at a time. Reports each one as it happens, plus a closing
+summary in the same spirit as Guix's own grafting output:
 
 ```
 grafted /nix/store/9f3a...-openssl-3.2.1 -> /nix/store/2b0e...-openssl-3.2.2
