@@ -309,4 +309,14 @@ let pkgs = import <nixpkgs> {}; in rec {
       mkdir -p $out
       echo "$bareHash" > $out/bare-ref
     '';
+
+  # `pkgs.writeText` produces a single *file* as its whole output, not a
+  # directory — the same shape as a NixOS-managed /etc file resolved to
+  # its real store path (e.g. /etc/nix/nix.conf). `--edit`'s file-edit
+  # mechanism used to assume its extracted tree was always a directory.
+  editPlainFile = pkgs.writeText "config-file" "cores = 1\n";
+  editPlainFileConsumer = pkgs.runCommand "edit-plain-file-consumer" { } ''
+    mkdir -p $out
+    ln -s ${editPlainFile} $out/config-file
+  '';
 }

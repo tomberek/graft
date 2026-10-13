@@ -343,6 +343,59 @@ fn edit_file_grafts_a_hand_edited_file_up_through_the_closure() {
 }
 
 #[test]
+fn edit_handles_a_store_path_that_is_a_plain_file_not_a_directory() {
+    // editPlainFile's whole output is a single file (pkgs.writeText), the
+    // same shape as a NixOS-managed /etc file resolved to its real store
+    // path (e.g. /etc/nix/nix.conf) — used to fail with "failed to read
+    // directory ... Not a directory", since the file-edit mechanism's
+    // reference scan assumed its extracted tree was always a directory.
+    let plain_file = nix_build("editPlainFile");
+    let consumer = nix_build("editPlainFileConsumer");
+    let mut editors = Vec::new();
+    let editor = stub_editor(r#"echo "edited" >> "$1""#, &mut editors);
+
+    let output = graft(
+        &["replace", &consumer, "--edit", &plain_file, "."],
+        Some(&editor),
+    );
+    assert!(
+        output.status.success(),
+        "graft replace --edit on a plain-file store path failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let grafted = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    assert_ne!(grafted, consumer);
+
+    let grafted_contents = fs::read_to_string(format!("{grafted}/config-file")).unwrap();
+    assert!(
+        grafted_contents.contains("edited"),
+        "grafted file should contain the editor's marker: {grafted_contents}"
+    );
+}
+
+#[test]
+fn edit_rejects_a_subpath_selector_against_a_plain_file() {
+    let plain_file = nix_build("editPlainFile");
+    let consumer = nix_build("editPlainFileConsumer");
+    let mut editors = Vec::new();
+    let editor = stub_editor(r#"true"#, &mut editors);
+
+    let output = graft(
+        &["replace", &consumer, "--edit", &plain_file, "some/subpath"],
+        Some(&editor),
+    );
+    assert!(
+        !output.status.success(),
+        "a subpath selector against a plain file should be rejected, not silently misbehave"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("plain file") && stderr.contains("not a directory"),
+        "expected a clear rejection, got: {stderr}"
+    );
+}
+
+#[test]
 fn edit_drv_resolves_a_plain_output_path_to_its_deriver_automatically() {
     let consumer = nix_build("consumer");
     // Pass the plain output path, not its `.drv`, with its own output

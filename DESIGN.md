@@ -1485,3 +1485,30 @@ would silently skip substituting (mutating) every *later* sibling once an
 earlier one already matched. Kept as explicit loops instead of adopting
 the lint's suggestion, since the fold here is relied on for its side
 effects, not just its boolean result.
+
+## 24. `--edit`'s file-edit path assumed a store output was always a directory
+
+Reported directly: `graft replace /run/current-system --edit
+/etc/nix/nix.conf .` failed with `Error: failed to read directory
+/tmp/.../nix.conf — Caused by: Not a directory (os error 20)`. A
+NixOS-managed `/etc` file resolves to its real store path, and that store
+path can be — often is, for a single config file — a plain *file*, not a
+directory. `store::scan_references` (walking the edited tree for embedded
+references, see §4/§5) called `std::fs::read_dir` on it unconditionally,
+assuming the top-level path was always a directory the way its own
+per-entry recursion correctly handles symlink/dir/file for everything
+*beneath* the top. Reproduced directly with `pkgs.writeText` (whose whole
+output is a single file, the same shape) before fixing: same error,
+verbatim.
+
+Fixed by having `scan_references` check its own top-level path's type
+first — symlink, directory, or plain file — the same three-way dispatch
+its own `scan_dir` helper already does for nested entries, just applied
+once more at the entry point instead of assumed away. Also added an
+explicit rejection in `edit_file::produce_pair` for the adjacent case a
+subpath selector against a plain file (nothing to recurse into) that
+would otherwise construct a path that can never exist. Verified against
+`editPlainFile`/`editPlainFileConsumer` (a `writeText` output, real
+end-to-end edit through a symlinking consumer) for the fix itself, and a
+second test asserting the subpath case fails with a clear message rather
+than a confusing I/O error two layers down.

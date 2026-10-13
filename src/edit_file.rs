@@ -47,6 +47,13 @@ pub fn produce_pair(
     store::restore(&nar, &extracted)?;
     log::v(format!("extracted to {}", extracted.display()));
 
+    if subpath.is_some() && !extracted.is_dir() {
+        bail!(
+            "{} is a plain file, not a directory — a subpath selector doesn't apply; pass `.` \
+             to edit it directly",
+            path.display()
+        );
+    }
     let edit_target = match subpath {
         Some(sp) => extracted.join(sp),
         None => extracted.clone(),

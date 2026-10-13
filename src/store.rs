@@ -259,7 +259,7 @@ pub fn restore(nar: &[u8], target: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Scans every file (and symlink target) under `dir` for `/nix/store/
+/// Scans every file (and symlink target) under `path` for `/nix/store/
 /// <hash>-<name>` references embedded in its content — a raw byte scan,
 /// not a UTF-8 one, since edited content can be binary — returning each
 /// *existing* top-level store item found. Nix's own post-build reference
@@ -267,9 +267,29 @@ pub fn restore(nar: &[u8], target: &Path) -> Result<()> {
 /// never an unbounded scan of the whole store, so this is what lets
 /// `edit_file`'s synthetic-derivation re-add (see its own doc comment)
 /// declare the right `inputSrcs` for the daemon to actually find them in.
-pub fn scan_references(dir: &Path) -> Result<Vec<PathBuf>> {
+///
+/// `path` itself can be a plain file, not just a directory — a store
+/// output isn't always a tree (e.g. `pkgs.writeText`, or any NixOS-managed
+/// `/etc` file resolved to its real store path, is a single file) — so
+/// this checks `path`'s own type first instead of assuming it's always a
+/// directory the way [`scan_dir`]'s per-entry recursion can for everything
+/// *beneath* the top level.
+pub fn scan_references(path: &Path) -> Result<Vec<PathBuf>> {
     let mut found = HashSet::new();
-    scan_dir(dir, &mut found)?;
+    let file_type = std::fs::symlink_metadata(path)
+        .with_context(|| format!("failed to stat {}", path.display()))?
+        .file_type();
+    if file_type.is_symlink() {
+        if let Ok(target) = std::fs::read_link(path) {
+            scan_bytes(target.as_os_str().as_encoded_bytes(), &mut found);
+        }
+    } else if file_type.is_dir() {
+        scan_dir(path, &mut found)?;
+    } else if file_type.is_file() {
+        let bytes =
+            std::fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+        scan_bytes(&bytes, &mut found);
+    }
     let mut out: Vec<PathBuf> = found.into_iter().collect();
     out.sort();
     Ok(out)
