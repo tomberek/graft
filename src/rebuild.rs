@@ -129,6 +129,11 @@ fn own_output(path: &Path) -> Option<(PathBuf, String)> {
 ///    scan matches (see `store::store_hash`), narrower than the full
 ///    basename, so a reference embedded as just the hash (with no `-name`
 ///    suffix) is still caught.
+/// 4. `structuredAttrs`: the same three-way text match, applied
+///    recursively to every string anywhere in the tree — `__structuredAttrs
+///    = true` derivations (nixpkgs's `writeTextFile` family, among others)
+///    move what would otherwise be a flat `env` string into nested JSON
+///    instead, so `env`/`args` alone miss it.
 fn substitute_dependency(inner: &mut Value, old: &Path, new: &Path) -> Result<bool> {
     let old_base = store::basename(old)?;
     let new_base = store::basename(new)?;
@@ -215,13 +220,11 @@ fn substitute_dependency(inner: &mut Value, old: &Path, new: &Path) -> Result<bo
     if let Some(env) = inner.get_mut("env").and_then(|e| e.as_object_mut()) {
         for (k, v) in env.iter_mut() {
             if let Some(s) = v.as_str() {
-                if s.contains(&old_full) || s.contains(old_base.as_str()) || s.contains(&old_hash) {
+                if let Some(new_s) = substitute_text(
+                    s, &old_full, &new_full, &old_base, &new_base, &old_hash, &new_hash,
+                ) {
                     log::v(format!("  env.{k}: substituted {old_base} -> {new_base}"));
-                    *v = Value::String(
-                        s.replace(&old_full, &new_full)
-                            .replace(old_base.as_str(), new_base.as_str())
-                            .replace(&old_hash, &new_hash),
-                    );
+                    *v = Value::String(new_s);
                     found = true;
                 }
             }
@@ -230,18 +233,119 @@ fn substitute_dependency(inner: &mut Value, old: &Path, new: &Path) -> Result<bo
     if let Some(args) = inner.get_mut("args").and_then(|a| a.as_array_mut()) {
         for (i, v) in args.iter_mut().enumerate() {
             if let Some(s) = v.as_str() {
-                if s.contains(&old_full) || s.contains(old_base.as_str()) || s.contains(&old_hash) {
+                if let Some(new_s) = substitute_text(
+                    s, &old_full, &new_full, &old_base, &new_base, &old_hash, &new_hash,
+                ) {
                     log::v(format!("  args[{i}]: substituted {old_base} -> {new_base}"));
-                    *v = Value::String(
-                        s.replace(&old_full, &new_full)
-                            .replace(old_base.as_str(), new_base.as_str())
-                            .replace(&old_hash, &new_hash),
-                    );
+                    *v = Value::String(new_s);
                     found = true;
                 }
             }
         }
     }
 
+    // `__structuredAttrs = true` derivations (nixpkgs's `writeTextFile`
+    // family, among others) move what would otherwise be a flat `env`
+    // string into a nested JSON tree instead — e.g. the literal text
+    // content of a `writeShellScriptBin` script lives at
+    // `structuredAttrs.text`, not `env.text`. `inputs.drvs` still gets
+    // swapped correctly either way (that's declared structure, not text),
+    // but without this, the swap alone leaves the actual embedded
+    // reference silently stale: `found` was already `true` from the
+    // `inputs.drvs` match above, so nothing signals that this specific
+    // site was missed — found by actually hitting it (a newer nixpkgs
+    // than this project had been tested against switched to
+    // structuredAttrs for `writeTextFile`), not by reasoning about the
+    // schema. Walked generically (every string anywhere in the tree, not
+    // just a hardcoded `text` key) since any field could embed a reference.
+    if let Some(sa) = inner.get_mut("structuredAttrs") {
+        if substitute_strings_recursive(
+            sa, &old_full, &new_full, &old_base, &new_base, &old_hash, &new_hash,
+        ) {
+            log::v(format!(
+                "  structuredAttrs: substituted {old_base} -> {new_base}"
+            ));
+            found = true;
+        }
+    }
+
     Ok(found)
+}
+
+/// `old_full`/`old_base`/`old_hash` -> `new_full`/`new_base`/`new_hash`,
+/// in that order, same width Nix's own post-build scan can match a
+/// reference at (see `store::store_hash`'s doc comment). `None` if none
+/// of the three appear in `s` at all.
+fn substitute_text(
+    s: &str,
+    old_full: &str,
+    new_full: &str,
+    old_base: &str,
+    new_base: &str,
+    old_hash: &str,
+    new_hash: &str,
+) -> Option<String> {
+    if s.contains(old_full) || s.contains(old_base) || s.contains(old_hash) {
+        Some(
+            s.replace(old_full, new_full)
+                .replace(old_base, new_base)
+                .replace(old_hash, new_hash),
+        )
+    } else {
+        None
+    }
+}
+
+/// Applies [`substitute_text`] to every string anywhere inside `value`
+/// (objects and arrays walked recursively), e.g. a `structuredAttrs` tree.
+/// Returns whether anything changed.
+fn substitute_strings_recursive(
+    value: &mut Value,
+    old_full: &str,
+    new_full: &str,
+    old_base: &str,
+    new_base: &str,
+    old_hash: &str,
+    new_hash: &str,
+) -> bool {
+    match value {
+        Value::String(s) => {
+            match substitute_text(
+                s, old_full, new_full, old_base, new_base, old_hash, new_hash,
+            ) {
+                Some(new_s) => {
+                    *s = new_s;
+                    true
+                }
+                None => false,
+            }
+        }
+        Value::Array(items) => {
+            // Not `.any()`: every element must be visited and possibly
+            // mutated regardless of whether an earlier one already
+            // matched — `.any()`'s short-circuiting would silently skip
+            // substituting later elements once the first match is found.
+            let mut found = false;
+            for v in items.iter_mut() {
+                if substitute_strings_recursive(
+                    v, old_full, new_full, old_base, new_base, old_hash, new_hash,
+                ) {
+                    found = true;
+                }
+            }
+            found
+        }
+        Value::Object(map) => {
+            let mut found = false;
+            for v in map.values_mut() {
+                if substitute_strings_recursive(
+                    v, old_full, new_full, old_base, new_base, old_hash, new_hash,
+                ) {
+                    found = true;
+                }
+            }
+            found
+        }
+        _ => false,
+    }
 }

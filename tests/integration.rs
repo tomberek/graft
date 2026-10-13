@@ -349,13 +349,17 @@ fn edit_drv_resolves_a_plain_output_path_to_its_deriver_automatically() {
     // name ("out") as the selector — not a subpath that exists inside it,
     // so detect_edit falls back to resolving its deriver automatically.
     let mut editors = Vec::new();
+    // `writeShellScriptBin`'s content lives at `env.text` on older
+    // nixpkgs, or `structuredAttrs.text` on newer nixpkgs that default
+    // `writeTextFile` to `__structuredAttrs = true` — handle both shapes.
     let editor = stub_editor(
         r#"python3 -c "
 import json, sys
 path = sys.argv[1]
 d = json.load(open(path))
-lines = d['env']['text'].splitlines()
-d['env']['text'] = lines[0] + '\necho edited-marker\n' + '\n'.join(lines[1:]) + '\n'
+container = d['structuredAttrs'] if 'structuredAttrs' in d else d['env']
+lines = container['text'].splitlines()
+container['text'] = lines[0] + '\necho edited-marker\n' + '\n'.join(lines[1:]) + '\n'
 json.dump(d, open(path, 'w'))
 " "$1""#,
         &mut editors,

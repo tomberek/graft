@@ -1442,3 +1442,46 @@ one) — the two existing/new fixtures (`sonameLibOld`/
 `sonameLibNewMismatch`, same filename, different metadata; and the new
 `sonameBumpOld`/`sonameBumpNew`/`sonameBumpConsumer`, different filename
 entirely, with a real consumer proving the breakage) exercise both paths.
+
+## 23. `<nixpkgs>` was never pinned, and `--rebuild` missed `structuredAttrs`
+
+Reported as "cargo test fails" — but only in CI, never locally. Confirmed
+`gh run view --log-failed`: the same 4 tests failed identically across two
+different commits, deterministically, not flaky. `tests/fixtures/
+scenario.nix` resolves nixpkgs via `import <nixpkgs> {}` — a channel/
+`NIX_PATH` lookup, completely independent of the flake's own `nixpkgs`
+input (locked in `flake.lock`). `flake.nix`'s devShell never set
+`NIX_PATH`, so `<nixpkgs>` fell back to whatever the ambient machine
+happened to have configured: a local, non-upstream nixpkgs checkout on
+this project's own dev machine, and presumably something else entirely on
+GitHub's runner — neither one the flake's actual pin. Fixed by setting
+`NIX_PATH = "nixpkgs=${nixpkgs}"` on the devShell, so `<nixpkgs>` resolves
+identically — to the flake's own locked revision — everywhere `nix
+develop` runs.
+
+Pointing the test fixtures at the correct, intended nixpkgs revision is
+what actually *reproduced* the CI failures locally for the first time,
+confirming a real `--rebuild` bug rather than an environment artifact.
+Newer nixpkgs defaults `writeTextFile` (and therefore `writeShellScriptBin`,
+used throughout this project's own fixtures) to `__structuredAttrs = true`,
+which moves what used to be a flat `env.text` string into a nested
+`structuredAttrs.text` field instead. `substitute_dependency`'s
+`inputs.drvs` branch still swapped the declared input correctly (that's
+structure, not text), so `found` became `true` and the rebuild "succeeded"
+— while the actual embedded dependency path, now living inside
+`structuredAttrs`, was never touched. The exact same shape of bug as §21's
+bare-hash fix (one site structurally correct, a different site silently
+stale), just surfaced through a different nixpkgs mechanism. Fixed by
+walking `structuredAttrs` recursively (every string anywhere in the tree,
+not a hardcoded `text` key, since any field could embed a reference) with
+the same three-way (full path / basename / bare hash) match-and-replace
+`env`/`args` already used — factored into one shared `substitute_text`
+helper so the three sites share logic instead of each re-deriving it.
+
+One sharp edge hit while writing the recursive walker: clippy's own
+suggested fix for the array/object cases (`.fold` → `.any`) would have
+introduced a real bug — `.any()` short-circuits on the first match, which
+would silently skip substituting (mutating) every *later* sibling once an
+earlier one already matched. Kept as explicit loops instead of adopting
+the lint's suggestion, since the fold here is relied on for its side
+effects, not just its boolean result.

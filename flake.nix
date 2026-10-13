@@ -12,6 +12,14 @@
         let pkgs = nixpkgs.legacyPackages.${system}; in
         {
           default = pkgs.mkShell {
+            # tests/fixtures/scenario.nix resolves `<nixpkgs>` via NIX_PATH,
+            # which otherwise falls back to whatever channel/registry the
+            # ambient machine happens to have — not this flake's own locked
+            # input. Pinning it here means the test fixtures evaluate
+            # against the exact same nixpkgs everywhere `nix develop` runs
+            # (this machine, CI, anyone else's), rather than drifting
+            # silently out from under the tests depending on who runs them.
+            NIX_PATH = "nixpkgs=${nixpkgs}";
             # bash/gnused must be store paths (declarable as derivation
             # inputs); the ambient /usr/bin/bash isn't.
             # nix-diff/diffoscope/binutils (for readelf) are diagnostic
