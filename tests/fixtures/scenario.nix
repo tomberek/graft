@@ -245,6 +245,34 @@ let pkgs = import <nixpkgs> {}; in rec {
     cc -shared -fPIC -Wl,-soname,libfoo.so.2 -o $out/lib/libfoo.so.1 lib.c
   '';
 
+  # A real major-version SONAME bump: the filename changes too (same shape
+  # as openssl's libssl.so.1.1 -> libssl.so.3 across a major version), with
+  # a real consumer binary linked against the old one — exercises the
+  # "new provides no file literally named old's SONAME" case, which used
+  # to be silently skipped (lookup was keyed on old's own filename, which
+  # by construction can never exist under new once the filename itself
+  # changed) and is the one that actually breaks the consumer outright
+  # (`cannot open shared object file`), not just risks ABI drift.
+  sonameBumpOld = pkgs.runCommand "old-lib" { nativeBuildInputs = [ pkgs.gcc ]; } ''
+    mkdir -p $out/lib
+    echo 'int answer(void) { return 1; }' > lib.c
+    cc -shared -fPIC -Wl,-soname,libbump.so.1 -o $out/lib/libbump.so.1 lib.c
+  '';
+  sonameBumpNew = pkgs.runCommand "new-lib" { nativeBuildInputs = [ pkgs.gcc ]; } ''
+    mkdir -p $out/lib
+    echo 'int answer(void) { return 2; }' > lib.c
+    cc -shared -fPIC -Wl,-soname,libbump.so.2 -o $out/lib/libbump.so.2 lib.c
+  '';
+  sonameBumpConsumer = pkgs.runCommand "consumer-bump" { nativeBuildInputs = [ pkgs.gcc ]; } ''
+    mkdir -p $out/bin
+    cat > main.c <<'EOF'
+    #include <stdio.h>
+    int answer(void);
+    int main(void) { printf("answer: %d\n", answer()); return 0; }
+    EOF
+    cc -o $out/bin/consumer main.c ${sonameBumpOld}/lib/libbump.so.1 -Wl,-rpath,${sonameBumpOld}/lib
+  '';
+
   # --override-name / `graft find`: a store path with a name unique in its
   # own consumer's closure, so a bare-name query resolves unambiguously.
   nameMatchDep = pkgs.writeShellScriptBin "namematch" ''echo "namematch v1"'';

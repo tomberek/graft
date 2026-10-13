@@ -504,11 +504,11 @@ in this suite never shows one.
   reversible, lossless operation on something real, not just on this
   project's own synthetic fixtures.
 - **Still no full ABI check.** `derivation::warn_on_soname_mismatch` (see
-  §4) covers `SONAME` specifically, the one piece Guix's manual calls out
-  by name and the one piece a cheap `readelf -d` comparison can actually
-  answer; true ABI compatibility (symbol versioning, struct layout, etc.)
-  is a much harder problem this tool makes no attempt at — that's still on
-  the caller.
+  §4, §22) covers `SONAME` specifically, the one piece Guix's manual calls
+  out by name and the one piece a cheap `readelf -d` comparison can
+  actually answer; true ABI compatibility (symbol versioning, struct
+  layout, etc.) is a much harder problem this tool makes no attempt at —
+  that's still on the caller.
 - **`--rebuild` can still fail to find a substitution point, though now it
   says so.** It only recognizes a dependency as a whole `inputs.drvs`/
   `inputs.srcs` entry (matched by output name, see §6) or a literal
@@ -1401,3 +1401,44 @@ that finding-at-one-site should've been insufficient. Verified against
 the same fixture end-to-end: `env.bareHash` now carries the new hash, and
 the rebuilt output's only reference is to the new dependency — not empty,
 and not the old one.
+
+## 22. The SONAME check was keyed on the wrong filename
+
+Reported as "replacing openssl in a Nix binary seems to break it."
+Reproduced directly, smaller than openssl: a real consumer binary linked
+against `old`'s shared library, swapped to `new` via plain `--override`,
+with `old`/`new` built to look like a genuine major-version SONAME bump
+(`libfoo.so.1` -> `libfoo.so.2` — the same shape as openssl's own
+`libssl.so.1.1` -> `libssl.so.3` across a major version, which does
+change the file's name, not just its internal metadata). The grafted
+binary ran fine as far as `graft` was concerned — one line, "grafted ...
+-> ...", no errors — and then failed outright: `error while loading
+shared libraries: libfoo.so.1: cannot open shared object file: No such
+file or directory`. No warning printed anywhere first.
+
+The bug: `warn_on_soname_mismatch` looked for a match in `new` using
+`old`'s own *filename* (`new.join(libdir).join(old_so.file_name())`). But
+a consumer's ELF `NEEDED` entry is the exact filename of the library it
+was linked against, baked in verbatim at link time — a graft's path
+substitution rewrites the *RPATH directory string* (a store path), never
+a `NEEDED` entry's filename, since that string never looks like a store
+path to begin with. So what actually determines whether the dynamic
+linker can still resolve the dependency after a graft isn't "does `new`
+have a file with the same name as `old`'s" — it's "does `new` have a file
+named exactly what `old`'s SONAME says," because that SONAME is what
+ended up in the consumer's `NEEDED` entry. Once a major-version bump
+changes the filename, looking it up by `old`'s own filename can never
+find it in `new` by construction — and the old code's response to not
+finding a same-named file was to `continue` silently, exactly backwards:
+that's the single most important case to warn about, not the case to skip.
+
+Fixed by keying the lookup on `old`'s SONAME instead of its filename:
+`new.join(libdir).join(old_soname)`. Missing entirely is now a hard,
+specific warning naming the exact failure mode (`cannot open shared
+object file`) before it happens, not after. Present but with a
+*different* embedded SONAME is still the softer warning §4 already had
+(now reached via the SONAME-keyed lookup rather than the filename-keyed
+one) — the two existing/new fixtures (`sonameLibOld`/
+`sonameLibNewMismatch`, same filename, different metadata; and the new
+`sonameBumpOld`/`sonameBumpNew`/`sonameBumpConsumer`, different filename
+entirely, with a real consumer proving the breakage) exercise both paths.

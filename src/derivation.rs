@@ -676,6 +676,18 @@ pub fn add_out_link(target: &Path, link: &Path, nix_args: &[String]) -> Result<(
 /// to begin with, is simply skipped. Only checks `lib`/`lib64` directly
 /// under `old`/`new` (not a full recursive walk) — covers the common case
 /// without the cost of scanning an entire closure member's tree.
+///
+/// Looks up `new` by `old`'s *SONAME*, not `old`'s own filename — the
+/// dynamic linker resolves a consumer's `NEEDED` entry (baked into its ELF
+/// at link time, verbatim, never touched by a graft's path substitution)
+/// against the exact filename an SONAME-named library has, not against
+/// whatever this library happens to be called in `old`. Confirmed directly:
+/// a major-version SONAME bump (e.g. `libfoo.so.1` -> `libfoo.so.2`) changes
+/// the filename too, so a lookup keyed on `old`'s filename finds nothing in
+/// `new` and silently skips with no warning at all — exactly the case where
+/// a warning matters most, since the resulting graft runs fine but the
+/// grafted binary fails outright at launch (`cannot open shared object
+/// file`), not just subtly misbehave.
 pub fn warn_on_soname_mismatch(old: &Path, new: &Path) {
     for libdir in ["lib", "lib64"] {
         let Ok(entries) = std::fs::read_dir(old.join(libdir)) else {
@@ -689,18 +701,30 @@ pub fn warn_on_soname_mismatch(old: &Path, new: &Path) {
             if !looks_like_shared_lib(file_name) {
                 continue;
             }
-            let new_so = new.join(libdir).join(file_name);
-            if !new_so.exists() {
+            let Some(old_soname) = soname(&old_so) else {
+                continue;
+            };
+            let expected = new.join(libdir).join(&old_soname);
+            if !expected.exists() {
+                eprintln!(
+                    "warning: {} has SONAME `{old_soname}`, but {} provides no library \
+                     literally named that — anything dynamically linked against it (its NEEDED \
+                     entry is `{old_soname}` verbatim, not a store path a graft can rewrite) will \
+                     fail to load after this replacement with `cannot open shared object file`",
+                    old_so.display(),
+                    new.display()
+                );
                 continue;
             }
-            if let (Some(old_soname), Some(new_soname)) = (soname(&old_so), soname(&new_so)) {
-                if old_soname != new_soname {
+            if let Some(new_soname) = soname(&expected) {
+                if new_soname != old_soname {
                     eprintln!(
-                        "warning: {} has SONAME `{old_soname}`, but {} has `{new_soname}` — \
+                        "warning: {} is still provided under its old name (`{old_soname}`) in \
+                         {}, but that file's own SONAME is now `{new_soname}` instead — \
                          grafting a shared library with a different SONAME can break dynamic \
                          linking for anything that depends on it",
                         old_so.display(),
-                        new_so.display()
+                        new.display()
                     );
                 }
             }

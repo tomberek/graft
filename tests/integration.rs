@@ -561,6 +561,49 @@ fn replace_warns_on_a_soname_mismatch_but_still_grafts() {
 }
 
 #[test]
+fn replace_warns_loudly_when_a_soname_bump_would_break_the_consumer_outright() {
+    // sonameBumpOld/sonameBumpNew simulate a real major-version SONAME
+    // bump (the filename itself changes, e.g. libssl.so.1.1 -> libssl.so.3)
+    // with a real consumer linked against the old one. The graft still
+    // "succeeds" (grafting only rewrites the store-path RPATH, never a
+    // NEEDED entry's literal filename), but the result is actually broken.
+    let old = nix_build("sonameBumpOld");
+    let new = nix_build("sonameBumpNew");
+    let consumer = nix_build("sonameBumpConsumer");
+
+    let output = graft(&["replace", &consumer, "--override", &old, &new], None);
+    assert!(
+        output.status.success(),
+        "a SONAME bump should warn, not fail, the graft: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("libbump.so.1")
+            && stderr.contains("provides no library literally named that")
+            && stderr.contains("cannot open shared object file"),
+        "expected a loud warning naming the exact breakage, got: {stderr}"
+    );
+
+    // The warning isn't theoretical: the grafted consumer genuinely fails
+    // to start, since its NEEDED entry (libbump.so.1) no longer resolves
+    // in the new library directory (which only has libbump.so.2).
+    let grafted = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let run = Command::new(format!("{grafted}/bin/consumer"))
+        .output()
+        .unwrap();
+    assert!(
+        !run.status.success(),
+        "grafted consumer should fail to start, not silently run with the wrong library"
+    );
+    assert!(
+        String::from_utf8_lossy(&run.stderr).contains("libbump.so.1"),
+        "expected the dynamic linker's own missing-library error, got: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn cutoff_stops_propagation_and_leaves_everything_above_it_untouched() {
     let leaf = nix_build("chainLeaf");
     let leaf_v2 = nix_build("chainLeafV2");
